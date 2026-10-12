@@ -293,7 +293,7 @@
       '<option value="workspace_inspect">workspace_inspect — verified listing</option>' +
       "</select></label></div>" +
       '<label class="field"><span>Parameters (JSON)</span>' +
-      '<textarea id="nt-params" rows="3" class="mono" placeholder=\'{"root": ".", "pattern": "**/*.py"}\'></textarea></label>' +
+      '<textarea id="nt-params" rows="3" class="mono" placeholder=\'{"root": ".", "pattern": "**/*.py", "output": "report.md"}\'></textarea></label>' +
       '<div id="nt-error" class="error hidden"></div>' +
       '<div class="actions"><button class="btn ghost" id="nt-cancel">Cancel</button>' +
       '<button class="btn primary" id="nt-create">Create &amp; run</button></div>'

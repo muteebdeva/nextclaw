@@ -131,7 +131,7 @@ class ServerContext:
 
         def _run():
             try:
-                if mode == "agent":
+                if mode == "run-agent":
                     agent_llm.run_llm_task(task_id, self.cfg, approver=self.gate)
                 else:
                     agent.run_task(task_id, self.cfg, approver=self.gate)
@@ -335,7 +335,7 @@ class Handler(BaseHTTPRequestHandler):
         if mode not in ("run", "run-agent"):
             raise ApiError(400, "mode must be 'run' or 'run-agent'")
         cfg = self.ctx.cfg
-        if mode == "agent":
+        if mode == "run-agent":
             verify = body.get("verify")
             task_id = agent_llm.create_agent_task(goal, cfg, verify=verify)
         else:
@@ -347,6 +347,13 @@ class Handler(BaseHTTPRequestHandler):
                 task_id = agent.create_task(goal, task_type, params, cfg)
             except ValueError as exc:
                 raise ApiError(400, str(exc))
+            except Exception as exc:
+                # generate_plan raises UnsupportedTask (a ProviderError, not a
+                # ValueError) for bad params — that's a client error, not a 500.
+                from .models import ProviderError
+                if isinstance(exc, ProviderError):
+                    raise ApiError(400, str(exc))
+                raise
         self.ctx.approvals.audit("user", "task.created", task_id, {"mode": mode, "goal": goal[:200]})
         self.ctx.submit_task(task_id, mode)
         self._send_json({"task_id": task_id, "status": "queued"}, status=201)

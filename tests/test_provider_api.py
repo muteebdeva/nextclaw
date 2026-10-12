@@ -166,5 +166,49 @@ class ProviderApiTest(unittest.TestCase):
         self.assertIn("default_id", data)
 
 
+class TaskCreateApiTest(ProviderApiTest):
+    """Regression tests for the task-creation modal's 'internal error'.
+
+    Two bugs: (1) mode 'run-agent' never matched `mode == "agent"`, so
+    model-driven tasks silently fell into the deterministic planner;
+    (2) UnsupportedTask (not a ValueError) from generate_plan escaped as a
+    500 instead of a 400 with an actionable message.
+    """
+
+    def req_noexec(self, path, method="GET", body=None, token="test-token"):
+        # Create tasks without executing them: the background runner would
+        # otherwise perform real filesystem writes during the test.
+        from nextclaw.server import ServerContext
+        with mock.patch.object(ServerContext, "submit_task", lambda self, tid, mode: None):
+            return self.req(path, method, body, token)
+
+    def test_run_agent_mode_creates_agent_task(self):
+        code, data = self.req_noexec("/api/tasks", "POST", {
+            "goal": "Do something smart.", "mode": "run-agent",
+            "task_type": "file_report",
+            "params": {"root": ".", "pattern": "**/*.py"}})
+        self.assertEqual(code, 201, data)
+        task_id = data["task_id"]
+        code, detail = self.req(f"/api/tasks/{task_id}")
+        self.assertEqual(code, 200)
+        self.assertEqual(detail["task_type"], "agent")
+
+    def test_missing_param_is_400_not_500(self):
+        code, data = self.req_noexec("/api/tasks", "POST", {
+            "goal": "List files.", "mode": "run",
+            "task_type": "file_report",
+            "params": {"root": ".", "pattern": "**/*.py"}})
+        self.assertEqual(code, 400)
+        self.assertIn("output", data["error"])
+
+    def test_valid_deterministic_task(self):
+        code, data = self.req_noexec("/api/tasks", "POST", {
+            "goal": "List files.", "mode": "run",
+            "task_type": "file_report",
+            "params": {"root": ".", "pattern": "**/*.py",
+                       "output": "report.md"}})
+        self.assertEqual(code, 201, data)
+
+
 if __name__ == "__main__":
     unittest.main()
