@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -599,6 +600,83 @@ def _browser_close(args: Dict[str, Any], cfg) -> Any:
 
     browsing.close_session()
     return {"ok": True}
+
+
+@tool(
+    "delegate",
+    "Delegate subtasks to specialized worker agents (researcher/planner/coder/"
+    "tester/reviewer). Independent subtasks run in parallel; dependencies are "
+    "respected. Returns a structured report with each worker's result.",
+    risk="medium",
+)
+def _delegate(args: Dict[str, Any], cfg) -> Any:
+    from . import delegation as deleg_mod
+
+    goal = str(args.get("goal", "")).strip()
+    raw_subtasks = args.get("subtasks", [])
+    # Be liberal: accept a JSON string too (some models emit strings).
+    if isinstance(raw_subtasks, str):
+        try:
+            raw_subtasks = json.loads(raw_subtasks)
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"delegate: subtasks is not valid JSON: {exc}")
+    if not goal:
+        raise ToolError("delegate needs 'goal'")
+    if not isinstance(raw_subtasks, list) or not raw_subtasks:
+        raise ToolError("delegate needs a non-empty 'subtasks' list")
+    # Depth guard: workers must not spawn unlimited sub-delegations.
+    depth = int(args.get("depth", 1))
+    budgets_arg = args.get("budgets", {}) or {}
+    budgets = deleg_mod.DelegationBudgets(**{
+        k: v for k, v in budgets_arg.items()
+        if k in deleg_mod.DelegationBudgets.__dataclass_fields__})
+    if depth > budgets.max_depth:
+        raise ToolError(
+            f"delegate: depth {depth} exceeds max_depth {budgets.max_depth}")
+    subtasks = []
+    for i, raw in enumerate(raw_subtasks):
+        if not isinstance(raw, dict):
+            raise ToolError(f"delegate: subtask {i} must be an object")
+        try:
+            subtasks.append(deleg_mod.Subtask(
+                id=str(raw.get("id", f"s{i}")),
+                name=str(raw.get("name", f"subtask-{i}")),
+                goal=str(raw.get("goal", "")),
+                kind=str(raw.get("kind", "agent")),
+                profile=str(raw.get("profile", "researcher")),
+                tool=str(raw.get("tool", "")),
+                args=dict(raw.get("args", {})),
+                depends_on=list(raw.get("depends_on", [])),
+                acceptance_criteria=list(raw.get("acceptance_criteria", [])),
+                max_retries=int(raw.get("max_retries", 2)),
+            ))
+        except (TypeError, ValueError) as exc:
+            raise ToolError(f"delegate: bad subtask {i}: {exc}")
+        if not subtasks[-1].goal and subtasks[-1].kind == "agent":
+            raise ToolError(f"delegate: subtask {i} needs a goal")
+    try:
+        report = deleg_mod.run_delegation(
+            cfg, goal, subtasks,
+            mission_id=str(args.get("mission_id", "")),
+            budgets=budgets,
+            approvals=tuple(args.get("approvals", ())),
+            depth=depth)
+    except deleg_mod.DelegationError as exc:
+        raise ToolError(f"delegate: {exc}")
+    # Keep the report compact for model context; full detail stays in the DB.
+    return {
+        "mission_id": report["mission_id"],
+        "status": report["status"],
+        "results": {
+            sid: {"profile": r["profile"], "status": r["status"],
+                  "summary": r["summary"][:500],
+                  "errors": r["errors"][:2]}
+            for sid, r in report["results"].items()
+        },
+        "artifacts": report["artifacts"],
+        "usage": report["usage"],
+        **({"error": report["error"]} if report.get("error") else {}),
+    }
 
 
 @tool(

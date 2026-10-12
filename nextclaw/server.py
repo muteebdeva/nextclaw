@@ -310,6 +310,8 @@ class Handler(BaseHTTPRequestHandler):
         # Parameterized routes.
         if path.startswith("/api/tasks/"):
             return self._route_task(method, path, qs)
+        if path.startswith("/api/delegations/"):
+            return self._route_delegation(method, path, qs)
         if path.startswith("/api/approvals/"):
             return self._route_approval(method, path)
         if path.startswith("/api/scheduler/jobs/"):
@@ -478,6 +480,35 @@ class Handler(BaseHTTPRequestHandler):
             self.ctx.approvals.audit("user", "task.cancel", task_id, {})
             return self._send_json({"task_id": task_id, "status": "cancelling"})
         self._error(404, "not found")
+
+    def _route_delegation(self, method: str, path: str, qs) -> None:
+        # GET /api/delegations/<mission_id> — workers, statuses, artifacts.
+        if method != "GET":
+            return self._error(405, "method not allowed")
+        mission_id = path[len("/api/delegations/"):].split("/")[0]
+        if not mission_id:
+            return self._error(400, "mission id required")
+        from .delegation import list_artifacts
+        # Worker tasks carry mission_id + worker_id + profile in params.
+        workers = []
+        for t in self.ctx.tasks.list_tasks(limit=200):
+            params = t.get("params") or {}
+            if params.get("mission_id") == mission_id and params.get("worker_id"):
+                workers.append({
+                    "task_id": t["id"],
+                    "worker_id": params.get("worker_id"),
+                    "profile": params.get("profile"),
+                    "subtask_id": params.get("subtask_id"),
+                    "status": t["status"],
+                    "error": t.get("error") or "",
+                    "updated_at": t["updated_at"],
+                })
+        workers.sort(key=lambda w: w["updated_at"])
+        return self._send_json({
+            "mission_id": mission_id,
+            "workers": workers,
+            "artifacts": list_artifacts(self.ctx.cfg.data_dir, mission_id),
+        })
 
     def _api_sse_ticket(self, qs) -> None:
         # Issued only after Bearer auth (checked in _handle). Short-lived,

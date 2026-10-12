@@ -43,6 +43,7 @@ DEFAULT_ALLOWED_TOOLS = (
     "browser.wait",
     "browser.screenshot",
     "browser.close",
+    "delegate",
     "exec.run",
 )
 

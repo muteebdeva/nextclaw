@@ -213,6 +213,19 @@ PARAM_SPECS: Dict[str, Dict[str, Any]] = {
         "properties": {},
         "required": [],
     },
+    "delegate": {
+        "description": (
+            "Delegate subtasks to specialized worker agents for COMPLEX multi-part "
+            "tasks only (researcher/planner/coder/tester/reviewer). Simple requests "
+            "stay on the single-agent path. Independent subtasks run in parallel."
+        ),
+        "properties": {
+            "goal": {"type": "string", "description": "Overall objective for the workers"},
+            "subtasks": {"type": "string", "description": "JSON list of subtask objects: id, name, goal, profile, depends_on[], acceptance_criteria[]"},
+            "depth": {"type": "string", "description": "Delegation depth (default 1)"},
+        },
+        "required": ["goal", "subtasks"],
+    },
 }
 
 

@@ -308,7 +308,7 @@ from chat — they require the dashboard or CLI. Token via
 - [x] Interactive browser automation (CDP, stdlib-only; click/fill/select approval-gated)
 - [x] Long-running background missions (pause/resume, budgets, idempotency, restart recovery)
 - [x] Independent verification engine (acceptance criteria, pass/fail/inconclusive)
-- [ ] Multi-agent delegation
+- [x] Multi-agent delegation (worker profiles, parallel DAG, artifacts, review)
 - [ ] Cost/token accounting per task
 - [ ] Head-to-head benchmark vs alternatives
 
@@ -345,6 +345,31 @@ and gate approval-required tools through the existing approval store.
 `tests` (exit code), `files` (existence + content), `command` (exit +
 output), and `browser` (page state). Uncheckable criteria are
 **inconclusive**, never passed. Used by missions and the agent loop.
+
+## Multi-agent delegation
+
+For complex multi-part work, the lead agent can delegate to specialized
+workers via the `delegate` tool (or a mission step):
+
+```python
+# Worker profiles: researcher, planner, coder, tester, reviewer
+# (extensible via delegation.register_profile)
+```
+
+- Independent subtasks run **in parallel** (bounded concurrency);
+  dependencies are respected; cycles are rejected.
+- Workers are regular agent tasks with profile-specific system prompts and
+  restricted tool allowlists — they never inherit extra permissions.
+- Structured handoffs (`WorkerResult`): status, summary, artifacts,
+  evidence, errors, usage. Validated; worker outputs are untrusted data.
+- Shared artifacts with provenance + versioning (`artifacts/<worker>/`).
+- Failure recovery: retryable errors retried (bounded); failed subtasks
+  fail their dependents without wasted work; no blind full restarts.
+- Independent reviewer can request revisions within a bounded round budget.
+- Global budgets: max workers, concurrency, depth, model calls, runtime,
+  retries. Cancellation propagates to workers.
+- Dashboard: `GET /api/delegations/<mission_id>` shows workers, statuses,
+  and artifacts. Simple tasks stay on the single-agent path.
 
 ## Contributing
 
