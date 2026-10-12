@@ -1,5 +1,6 @@
 """Tests for the dashboard API server (real HTTP, temp data dir)."""
 import json
+import os
 import tempfile
 import threading
 import time
@@ -215,13 +216,20 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(body["enabled"])
 
     # -- SSE ----------------------------------------------------------------------------
+    def _sse_ticket(self):
+        status, body = self.req("/api/sse/ticket", method="POST")
+        self.assertEqual(status, 200)
+        self.assertIn("ticket", body)
+        return body["ticket"]
+
     def test_sse_streams_events(self):
         status, body = self.req("/api/tasks", method="POST", body={
             "goal": "sse test", "mode": "run", "task_type": "file_report",
             "params": {"root": ".", "pattern": "*.md", "output": "reports/sse.md"}})
         tid = body["task_id"]
+        ticket = self._sse_ticket()
         req = urllib.request.Request(
-            f"{self.base}/api/tasks/{tid}/events?token=test-token&since=0")
+            f"{self.base}/api/tasks/{tid}/events?ticket={ticket}&since=0")
         text = ""
         with urllib.request.urlopen(req, timeout=30) as resp:
             self.assertIn("text/event-stream", resp.headers.get("Content-Type"))
@@ -235,6 +243,249 @@ class ServerTest(unittest.TestCase):
                 if line.startswith("event: done"):
                     break
         self.assertIn('"kind": "status"', text)
+
+    def test_sse_ticket_requires_auth(self):
+        status, _ = self.req("/api/sse/ticket", method="POST", token=None)
+        self.assertEqual(status, 401)
+        status, _ = self.req("/api/sse/ticket", method="POST", token="wrong")
+        self.assertEqual(status, 401)
+
+    def test_sse_ticket_single_use_no_replay(self):
+        status, body = self.req("/api/tasks", method="POST", body={
+            "goal": "sse replay", "mode": "run", "task_type": "file_report",
+            "params": {"root": ".", "pattern": "*.md", "output": "reports/sse2.md"}})
+        tid = body["task_id"]
+        ticket = self._sse_ticket()
+        # First use: redeem (cancel the stream immediately via short read).
+        req = urllib.request.Request(f"{self.base}/api/tasks/{tid}/events?ticket={ticket}")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            self.assertEqual(resp.status, 200)
+            resp.readline()
+        # Replay with the same ticket must fail.
+        req2 = urllib.request.Request(f"{self.base}/api/tasks/{tid}/events?ticket={ticket}")
+        try:
+            urllib.request.urlopen(req2, timeout=15)
+            self.fail("replayed ticket was accepted")
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 401)
+
+    def test_sse_bad_and_expired_ticket_rejected(self):
+        status, body = self.req("/api/tasks", method="POST", body={
+            "goal": "sse bad ticket", "mode": "run", "task_type": "file_report",
+            "params": {"root": ".", "pattern": "*.md", "output": "reports/sse3.md"}})
+        tid = body["task_id"]
+        for bad in ("nope", ""):
+            req = urllib.request.Request(
+                f"{self.base}/api/tasks/{tid}/events?ticket={bad}")
+            try:
+                urllib.request.urlopen(req, timeout=15)
+                self.fail(f"bad ticket {bad!r} was accepted")
+            except urllib.error.HTTPError as exc:
+                self.assertEqual(exc.code, 401)
+        # Expired ticket: mint one, then force its expiry server-side.
+        ticket = self._sse_ticket()
+        self.ctx._sse_tickets[ticket] = time.time() - 1
+        req = urllib.request.Request(f"{self.base}/api/tasks/{tid}/events?ticket={ticket}")
+        try:
+            urllib.request.urlopen(req, timeout=15)
+            self.fail("expired ticket was accepted")
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 401)
+
+    def test_sse_long_lived_token_no_longer_in_url(self):
+        # The dashboard token in ?token= must NOT grant SSE access anymore.
+        status, body = self.req("/api/tasks", method="POST", body={
+            "goal": "sse no token", "mode": "run", "task_type": "file_report",
+            "params": {"root": ".", "pattern": "*.md", "output": "reports/sse4.md"}})
+        tid = body["task_id"]
+        req = urllib.request.Request(
+            f"{self.base}/api/tasks/{tid}/events?token=test-token")
+        try:
+            urllib.request.urlopen(req, timeout=15)
+            self.fail("long-lived token in URL was accepted for SSE")
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 401)
+
+
+class StaticAssetsTest(unittest.TestCase):
+    """Missing static assets must 404 (not serve index.html with 200);
+    SPA routes still fall back; traversal is rejected."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.d = tempfile.mkdtemp()
+        cls.ws = tempfile.mkdtemp()
+        cfg = load_config(overrides={"data_dir": cls.d, "workspace_root": cls.ws})
+        cls.ctx = ServerContext(cfg)
+        cls.ctx.token = "test-token"
+        Handler.ctx = cls.ctx
+        from http.server import ThreadingHTTPServer
+        cls.port = _free_port()
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", cls.port), Handler)
+        cls.srv.daemon_threads = True
+        cls.thread = threading.Thread(target=cls.srv.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+        cls.ctx.runner.shutdown(wait=False)
+
+    def raw(self, path):
+        req = urllib.request.Request(self.base + path, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.status, resp.read(), resp.headers.get("Content-Type")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read(), exc.headers.get("Content-Type")
+
+    def test_missing_js_404(self):
+        code, body, _ = self.raw("/nope-missing-12345.js")
+        self.assertEqual(code, 404)
+        self.assertNotIn(b"<!DOCTYPE", body)
+
+    def test_missing_css_png_svg_404(self):
+        for p in ("/missing.css", "/missing.png", "/missing.svg", "/missing.woff2"):
+            code, _, _ = self.raw(p)
+            self.assertEqual(code, 404, p)
+
+    def test_existing_asset_200(self):
+        code, body, ctype = self.raw("/app.js")
+        self.assertEqual(code, 200)
+        self.assertIn("javascript", ctype)
+        self.assertGreater(len(body), 1000)
+
+    def test_spa_fallback_for_routes(self):
+        code, body, ctype = self.raw("/")
+        self.assertEqual(code, 200)
+        self.assertIn(b"<html", body.lower())
+        code, body, _ = self.raw("/some/frontend/route")
+        self.assertEqual(code, 200)
+        self.assertIn(b"<html", body.lower())
+
+    def test_path_traversal_rejected(self):
+        for p in ("/..%2fserver.py", "/%2e%2e/%2e%2e/etc/passwd", "/..\\server.py"):
+            code, _, _ = self.raw(p)
+            self.assertIn(code, (400, 404), p)
+
+    def test_index_not_served_for_asset_like_query(self):
+        # A missing asset with a query string is still a 404.
+        code, _, _ = self.raw("/missing.js?v=2")
+        self.assertEqual(code, 404)
+
+
+class TokenRotationTest(unittest.TestCase):
+    """Dashboard token rotation: atomic swap, auth, confirmation,
+    concurrency, and old-token invalidation."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.d = tempfile.mkdtemp()
+        cls.ws = tempfile.mkdtemp()
+        cfg = load_config(overrides={"data_dir": cls.d, "workspace_root": cls.ws})
+        cls.ctx = ServerContext(cfg)
+        cls.ctx.token = "test-token"
+        Handler.ctx = cls.ctx
+        from http.server import ThreadingHTTPServer
+        cls.port = _free_port()
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", cls.port), Handler)
+        cls.srv.daemon_threads = True
+        cls.thread = threading.Thread(target=cls.srv.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+        cls.ctx.runner.shutdown(wait=False)
+
+    def tearDown(self):
+        # Every rotation test restores the shared test token.
+        self.ctx.token = "test-token"
+        with open(f"{self.d}/api_token", "w") as f:
+            f.write("test-token")
+
+    def req(self, path, method="GET", body=None, token="test-token"):
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        data = json.dumps(body).encode() if body is not None else None
+        if data:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(self.base + path, data=data,
+                                     headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode())
+
+    def test_rotate_success_and_old_token_dead(self):
+        code, data = self.req("/api/auth/rotate", "POST", {"confirm": True})
+        self.assertEqual(code, 200, data)
+        new_token = data["token"]
+        self.assertTrue(len(new_token) >= 32)
+        self.assertNotEqual(new_token, "test-token")
+        # Old token is now invalid; new token works.
+        code, _ = self.req("/api/status", token="test-token")
+        self.assertEqual(code, 401)
+        code, status = self.req("/api/status", token=new_token)
+        self.assertEqual(code, 200)
+        # Persisted to disk (0600) so a restart keeps working.
+        import stat as statmod
+        st = os.stat(f"{self.d}/api_token")
+        self.assertEqual(statmod.S_IMODE(st.st_mode), 0o600)
+        self.assertEqual(open(f"{self.d}/api_token").read(), new_token)
+
+    def test_rotate_requires_confirmation(self):
+        code, data = self.req("/api/auth/rotate", "POST", {})
+        self.assertEqual(code, 400)
+        self.assertIn("confirmation", data["error"])
+        # Token unchanged.
+        code, _ = self.req("/api/status", token="test-token")
+        self.assertEqual(code, 200)
+
+    def test_rotate_requires_auth(self):
+        code, _ = self.req("/api/auth/rotate", "POST", {"confirm": True}, token=None)
+        self.assertEqual(code, 401)
+        code, _ = self.req("/api/auth/rotate", "POST", {"confirm": True}, token="wrong")
+        self.assertEqual(code, 401)
+
+    def test_rotate_refused_when_env_managed(self):
+        self.ctx.token_source = "env"
+        try:
+            code, data = self.req("/api/auth/rotate", "POST", {"confirm": True})
+            self.assertEqual(code, 409)
+            self.assertIn("NEXTCLAW_API_TOKEN", data["error"])
+        finally:
+            self.ctx.token_source = "file"
+
+    def test_rotate_concurrent_single_winner(self):
+        import concurrent.futures
+        results = []
+
+        def attempt():
+            return self.req("/api/auth/rotate", "POST", {"confirm": True})
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            futs = [ex.submit(attempt) for _ in range(2)]
+            results = [f.result() for f in futs]
+        codes = sorted(c for c, _ in results)
+        # Exactly one rotation wins. The loser is rejected — either 401 (its
+        # request arrived after the swap) or 409 (it passed auth but lost the
+        # race under the lock). Either way there is exactly one live token and
+        # no silent double-rotation.
+        self.assertEqual(codes.count(200), 1, results)
+        self.assertTrue(all(c in (200, 401, 409) for c in codes), results)
+        winner = [d for c, d in results if c == 200][0]["token"]
+        code, _ = self.req("/api/status", token=winner)
+        self.assertEqual(code, 200)
+        code, _ = self.req("/api/status", token="test-token")
+        self.assertEqual(code, 401)
+        self.assertEqual(open(f"{self.d}/api_token").read(), winner)
 
 
 if __name__ == "__main__":

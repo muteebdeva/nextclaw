@@ -34,6 +34,44 @@
     return '<span class="pill ' + esc(status) + '">' + esc(status.replace(/_/g, " ")) + "</span>";
   }
 
+  /* ---------- global error reporting ----------
+     Vanilla equivalent of a React error boundary: catches uncaught JS
+     errors and unhandled promise rejections and shows a recovery banner
+     instead of leaving an unexplained blank screen. Never displays the
+     API token or other secrets; guarded against recursive reporting. */
+  var __fatalShown = false;
+  function __sanitizeError(msg) {
+    var s = String(msg == null ? "An unexpected error occurred." : msg);
+    try {
+      if (token && s.indexOf(token) !== -1) return "[details redacted]";
+    } catch (e) {}
+    return s.slice(0, 300);
+  }
+  function showFatalError(message) {
+    if (__fatalShown) return;
+    __fatalShown = true;
+    try {
+      var banner = document.createElement("div");
+      banner.id = "fatal-error";
+      banner.setAttribute("role", "alert");
+      banner.innerHTML =
+        '<div><strong>Something went wrong.</strong> ' +
+        '<span class="stat-sub">' + esc(__sanitizeError(message)) + "</span></div>" +
+        '<button class="btn primary small" id="fatal-reload">Reload</button>';
+      document.body.appendChild(banner);
+      document.getElementById("fatal-reload").addEventListener("click", function () {
+        location.reload();
+      });
+    } catch (e) { /* never throw from the error handler itself */ }
+  }
+  window.addEventListener("error", function (ev) {
+    showFatalError((ev && ev.message) || "An unexpected error occurred.");
+  });
+  window.addEventListener("unhandledrejection", function (ev) {
+    var r = ev && ev.reason;
+    showFatalError((r && (r.message || r)) || "An unhandled promise rejection occurred.");
+  });
+
   /* ---------- API client ---------- */
   function api(path, opts) {
     opts = opts || {};
@@ -151,19 +189,35 @@
   setInterval(refreshApprovalBadge, 15000);
 
   /* ---------- SSE ---------- */
-  var sse = null;
-  function stopSse() { if (sse) { sse.close(); sse = null; } }
+  var sse = null, sseTimer = null, sseTries = 0;
+  function stopSse() {
+    if (sseTimer) { clearTimeout(sseTimer); sseTimer = null; }
+    if (sse) { try { sse.close(); } catch (e) {} sse = null; }
+  }
   function watchTask(taskId, onEvent) {
     stopSse();
-    try {
-      // EventSource cannot send Authorization headers; pass the token as a
-      // query param for this endpoint only. The token is already in the URL
-      // bar's origin (localhost) and never logged server-side.
-      sse = new EventSource(API + "/api/tasks/" + taskId + "/events?token=" + encodeURIComponent(token));
-    } catch (e) { return; }
-    sse.onmessage = function (ev) { try { onEvent(JSON.parse(ev.data)); } catch (e) {} };
-    sse.addEventListener("done", function () { stopSse(); onEvent({ kind: "__done" }); });
-    sse.onerror = function () { stopSse(); };
+    sseTries = 0;
+    connectSse(taskId, onEvent);
+  }
+  function connectSse(taskId, onEvent) {
+    // EventSource cannot send Authorization headers, so we mint a
+    // short-lived single-use ticket via the authenticated API and put
+    // only the ticket in the URL — never the long-lived dashboard token.
+    api("/api/sse/ticket", { method: "POST" }).then(function (t) {
+      try {
+        sse = new EventSource(API + "/api/tasks/" + taskId + "/events?ticket=" + encodeURIComponent(t.ticket));
+      } catch (e) { return; }
+      sse.onmessage = function (ev) { try { onEvent(JSON.parse(ev.data)); } catch (e) {} };
+      sse.addEventListener("done", function () { stopSse(); onEvent({ kind: "__done" }); });
+      sse.onerror = function () {
+        stopSse();
+        // The ticket was single-use; reconnect with a fresh one.
+        // Bounded retries with backoff so a dead server can't hot-loop.
+        if (sseTries >= 5) return;
+        sseTries += 1;
+        sseTimer = setTimeout(function () { connectSse(taskId, onEvent); }, 1500 * sseTries);
+      };
+    }).catch(function () { /* ticket minting failed; leave SSE off */ });
   }
 
   /* ================= PAGES ================= */
@@ -892,6 +946,13 @@
         "<dt>Model timeout</dt><dd>" + esc(policy.llm_timeout_s) + "s</dd></div>" +
         '<p class="stat-sub">Limits are configured via environment / config file. ' +
         "Model and endpoint can be changed from Providers.</p></div></div>" +
+        '<div class="card" style="margin-top:16px"><h3>Security — API token</h3>' +
+        "<p class='stat-sub'>Token source: <span class='mono'>" + esc(status.token_source || "file") + "</span>. " +
+        (status.token_source === "env"
+          ? "Managed via NEXTCLAW_API_TOKEN; rotation is disabled — change the environment variable instead."
+          : "Rotating invalidates the current token immediately. Other sessions and saved tokens stop working.") +
+        "</p><div class='toolbar'><button class='btn small danger' id='rotate-token-btn'" +
+        (status.token_source === "env" ? " disabled" : "") + ">Rotate API token</button></div></div>" +
         '<div class="card" style="margin-top:16px"><h3>Permission policy — tools</h3>' +
         "<table><thead><tr><th>Tool</th><th>Risk</th><th>Approval</th><th>Description</th></tr></thead><tbody>" +
         policy.tools.map(function (t) {
@@ -903,7 +964,47 @@
         document.getElementById("theme-toggle").click();
       });
       document.getElementById("lock-btn2").addEventListener("click", lock);
+      var rotBtn = document.getElementById("rotate-token-btn");
+      if (rotBtn && !rotBtn.disabled) rotBtn.addEventListener("click", rotateTokenModal);
     }).catch(function (e) { showError(view, e); });
+  }
+
+  function rotateTokenModal() {
+    modal(
+      "<h2>Rotate API token</h2>" +
+      '<p class="stat-sub">This generates a new dashboard token and <strong>invalidates the current one immediately</strong>. ' +
+      "Other browser sessions, saved tokens, and scripts using the old token will stop working. " +
+      "The new token is shown <strong>once</strong> — save it somewhere safe.</p>" +
+      '<div id="rt-new" class="hidden"><label class="field"><span>New token (shown once)</span>' +
+      '<textarea id="rt-token" rows="2" class="mono" readonly></textarea></label>' +
+      '<div class="toolbar"><button class="btn small" id="rt-copy">Copy</button></div></div>' +
+      '<div id="rt-error" class="error hidden"></div>' +
+      '<div class="actions"><button class="btn ghost" id="rt-cancel">Cancel</button>' +
+      '<button class="btn primary danger" id="rt-confirm">Rotate token</button></div>'
+    );
+    document.getElementById("rt-cancel").addEventListener("click", closeModal);
+    document.getElementById("rt-confirm").addEventListener("click", function () {
+      var errEl = document.getElementById("rt-error");
+      api("/api/auth/rotate", { method: "POST", body: { confirm: true } }).then(function (d) {
+        // Adopt the new token for this session only (in memory); drop the
+        // stale persisted token so a reload goes to the unlock screen.
+        token = d.token;
+        storeDel("nc_token");
+        document.getElementById("rt-new").classList.remove("hidden");
+        document.getElementById("rt-token").value = d.token;
+        document.getElementById("rt-confirm").disabled = true;
+        document.getElementById("rt-cancel").textContent = "Done";
+        toast("Token rotated", "ok");
+      }).catch(function (e) {
+        errEl.textContent = e.message; errEl.classList.remove("hidden");
+      });
+    });
+    document.getElementById("rt-copy").addEventListener("click", function () {
+      var ta = document.getElementById("rt-token");
+      ta.select();
+      try { document.execCommand("copy"); toast("Copied", "ok"); }
+      catch (e) { toast("Copy manually", "bad"); }
+    });
   }
 
   /* ---------- boot ---------- */

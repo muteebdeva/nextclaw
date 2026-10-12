@@ -58,5 +58,29 @@ and forward only to loopback.
 - [ ] Firewall / security group restricts source IPs
 - [ ] `NEXTCLAW_BROWSER_ALLOW_NONPUBLIC` is **not** set
 - [ ] Telegram `NEXTCLAW_TELEGRAM_ALLOWED_IDS` lists only your user ID
+
+## SSE authentication (tickets, not tokens)
+
+`EventSource` cannot send `Authorization` headers, so the dashboard mints a
+short-lived **single-use ticket** via `POST /api/sse/ticket` (Bearer-authed)
+and connects with `GET /api/tasks/<id>/events?ticket=…`. Tickets expire after
+60 seconds and are consumed on first use, so replay fails. The long-lived
+dashboard token is never placed in a URL.
+
+Honest caveat: the ticket still travels in the query string, so a proxy or
+infrastructure log that records full URLs *can* capture it. The server itself
+never logs query strings (`log_message` strips them). Blast radius is bounded
+by the 60-second TTL and single-use redemption — but if your proxy logs URLs,
+configure it to redact query parameters (e.g. nginx `access_log` with a custom
+format omitting `$request`, or a `map` that masks `ticket=`).
+
+## Token rotation
+
+Settings → Security → **Rotate API token** (with explicit confirmation).
+The old token dies immediately; the new one is shown once — save it, as the
+browser keeps it in memory only for that session. If the token came from
+`NEXTCLAW_API_TOKEN`, rotation is refused: change the environment variable
+instead. Locked out? Delete `<data_dir>/api_token` and restart; a fresh token
+is generated and printed once at startup.
 - [ ] You understand approvals: the dashboard approve button authorizes
       real tool execution — don't approve what you don't understand

@@ -1,0 +1,53 @@
+name: Live provider smoke
+
+# Weekly real-provider smoke tests + manual runs. All credentials come from
+# repository secrets; when they are absent the suite SKIPS (exit 0) and the
+# summary says so explicitly — skips are never reported as passes.
+#
+# Required secrets (all optional; missing => skip):
+#   SMOKE_ADAPTER   openai_compat | anthropic | gemini | ollama | bedrock
+#   SMOKE_MODEL     model name, e.g. gpt-5-mini
+#   SMOKE_BASE_URL  endpoint for openai_compat / ollama / custom
+#   SMOKE_API_KEY   cloud API key
+# Optional: SMOKE_REGION, SMOKE_AWS_ACCESS_KEY, SMOKE_AWS_SECRET_KEY, SMOKE_TIMEOUT
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"  # Mondays 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Live provider smoke tests
+        env:
+          NEXTCLAW_LIVE_SMOKE: "1"
+          NEXTCLAW_SMOKE_ADAPTER: ${{ secrets.SMOKE_ADAPTER }}
+          NEXTCLAW_SMOKE_MODEL: ${{ secrets.SMOKE_MODEL }}
+          NEXTCLAW_SMOKE_BASE_URL: ${{ secrets.SMOKE_BASE_URL }}
+          NEXTCLAW_SMOKE_API_KEY: ${{ secrets.SMOKE_API_KEY }}
+          NEXTCLAW_SMOKE_REGION: ${{ secrets.SMOKE_REGION }}
+          NEXTCLAW_SMOKE_AWS_ACCESS_KEY: ${{ secrets.SMOKE_AWS_ACCESS_KEY }}
+          NEXTCLAW_SMOKE_AWS_SECRET_KEY: ${{ secrets.SMOKE_AWS_SECRET_KEY }}
+          NEXTCLAW_SMOKE_TIMEOUT: "60"
+        run: |
+          set -o pipefail
+          python -m unittest tests.test_providers_live -v 2>&1 | tee smoke.log
+      - name: Summarize
+        if: always()
+        run: |
+          if grep -q "^OK (skipped=" smoke.log; then
+            echo "### Live smoke: SKIPPED (no provider secrets configured)" >> "$GITHUB_STEP_SUMMARY"
+            echo "Configure SMOKE_* repository secrets or run manually with credentials." >> "$GITHUB_STEP_SUMMARY"
+          elif grep -q "^OK" smoke.log; then
+            echo "### Live smoke: PASSED against a real provider" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Live smoke: FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo "See the smoke.log output above for details." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

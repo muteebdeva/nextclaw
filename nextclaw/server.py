@@ -97,22 +97,76 @@ class ServerContext:
         self.runner = ThreadPoolExecutor(max_workers=2, thread_name_prefix="nc-task")
         self.running: Dict[str, Any] = {}  # task_id -> Future
         self.rate = RateLimiter()
-        self.token = self._load_token(cfg.data_dir)
+        self.token, self.token_source = self._load_token(cfg.data_dir)
+        # Short-lived single-use SSE tickets: ticket -> expiry timestamp.
+        # Issued only to Bearer-authenticated callers; redeemed (consumed) on
+        # first SSE connect. Never put the long-lived dashboard token in a URL.
+        self._sse_tickets: Dict[str, float] = {}
+        self._sse_lock = threading.Lock()
+        self._token_lock = threading.Lock()
+
+    SSE_TICKET_TTL_S = 60.0
+
+    def issue_sse_ticket(self) -> Dict[str, Any]:
+        """Mint a single-use SSE ticket (callers must already be authed)."""
+        ticket = secrets.token_urlsafe(24)
+        expires_at = time.time() + self.SSE_TICKET_TTL_S
+        with self._sse_lock:
+            # Prune expired tickets so the dict cannot grow unboundedly.
+            now = time.time()
+            for t in [t for t, exp in self._sse_tickets.items() if exp <= now]:
+                del self._sse_tickets[t]
+            self._sse_tickets[ticket] = expires_at
+        return {"ticket": ticket, "expires_in": int(self.SSE_TICKET_TTL_S)}
+
+    def redeem_sse_ticket(self, ticket: str) -> bool:
+        """Consume a ticket. Single-use: replay after first use fails."""
+        if not ticket:
+            return False
+        with self._sse_lock:
+            exp = self._sse_tickets.pop(ticket, None)
+        return exp is not None and exp > time.time()
 
     # -- auth -----------------------------------------------------------
     @staticmethod
-    def _load_token(data_dir: str) -> str:
+    def _load_token(data_dir: str) -> tuple:
+        """Returns (token, source) where source is 'env' or 'file'."""
         env_token = os.environ.get("NEXTCLAW_API_TOKEN", "").strip()
         if env_token:
-            return env_token
+            return env_token, "env"
         path = os.path.join(data_dir, "api_token")
         if os.path.exists(path):
-            return open(path).read().strip()
+            return open(path).read().strip(), "file"
         token = secrets.token_urlsafe(32)
         with open(path, "w") as f:
             f.write(token)
         os.chmod(path, 0o600)
-        return token
+        return token, "file"
+
+    def rotate_token(self, presented: str) -> str:
+        """Atomically swap the dashboard token. Returns the new token.
+
+        Only valid when the token is file-managed; env-managed tokens are
+        refused (the operator must change the env var). Re-validates the
+        presented credential under the lock so concurrent rotations cannot
+        silently double-rotate: the loser gets an error, not a dead token.
+        """
+        if self.token_source != "file":
+            raise ApiError(409, "token is managed via NEXTCLAW_API_TOKEN; "
+                                "rotation is not applicable")
+        with self._token_lock:
+            if not hmac.compare_digest(presented.strip(), self.token):
+                raise ApiError(409, "token was already rotated; "
+                                    "re-authenticate with the current token")
+            new_token = secrets.token_urlsafe(32)
+            path = os.path.join(self.cfg.data_dir, "api_token")
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(new_token)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)  # atomic swap on POSIX
+            self.token = new_token
+            return new_token
 
     def check_auth(self, headers) -> None:
         auth = headers.get("Authorization", "")
@@ -219,11 +273,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": True, "version": VERSION, "time": time.time()})
         if path == "/" or not path.startswith("/api/"):
             return self._serve_static(path)
-        # Auth: Bearer header normally; the SSE endpoint also accepts ?token=
-        # because EventSource cannot set request headers.
-        if "/events" in path and (qs.get("token") or [""])[0]:
-            if not hmac.compare_digest((qs.get("token") or [""])[0], self.ctx.token):
-                raise ApiError(401, "invalid token")
+        # Auth: Bearer header normally. The SSE endpoint cannot take headers
+        # (EventSource), so it accepts a short-lived single-use ?ticket=
+        # minted via POST /api/sse/ticket by an authenticated caller.
+        # The long-lived dashboard token is never placed in a URL.
+        # Note: log_message() strips query strings, so tickets never hit logs;
+        # a ticket is single-use with a 60s TTL, bounding replay/abuse if a
+        # proxy or infrastructure log does capture the URL.
+        if "/events" in path and (qs.get("ticket") or [""])[0]:
+            if not self.ctx.redeem_sse_ticket((qs.get("ticket") or [""])[0]):
+                raise ApiError(401, "invalid or expired ticket")
         else:
             self.ctx.check_auth(self.headers)
 
@@ -241,6 +300,8 @@ class Handler(BaseHTTPRequestHandler):
             ("GET", "/api/quota"): self._api_quota,
             ("GET", "/api/audit"): self._api_audit,
             ("GET", "/api/memory"): self._api_memory,
+            ("POST", "/api/sse/ticket"): self._api_sse_ticket,
+            ("POST", "/api/auth/rotate"): self._api_rotate_token,
         }
         handler = routes.get((method, path))
         if handler:
@@ -258,13 +319,31 @@ class Handler(BaseHTTPRequestHandler):
         self._error(404, "not found")
 
     # -- static dashboard -----------------------------------------------------
+    # Extensions treated as static assets: a missing asset is a 404, never
+    # the SPA fallback (which would serve index.html with 200 and confuse
+    # caches, service workers, and error detection).
+    _STATIC_EXTS = frozenset({
+        ".js", ".mjs", ".css", ".map", ".json", ".webmanifest",
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
+        ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".mp4", ".webm", ".mp3", ".wav", ".txt", ".xml",
+    })
+
     def _serve_static(self, path: str) -> None:
-        rel = path.lstrip("/") or "index.html"
-        if ".." in rel or rel.startswith("/"):
+        rel = urllib.parse.unquote(path.lstrip("/")) or "index.html"
+        if "\\" in rel:
             return self._error(400, "bad path")
-        full = os.path.join(WEB_DIR, rel)
+        # Contain every request inside WEB_DIR: normalize, resolve symlinks,
+        # and reject anything that escapes (blocks ".." and encoded variants).
+        web_root = os.path.realpath(WEB_DIR)
+        full = os.path.realpath(os.path.join(web_root, os.path.normpath(rel)))
+        if os.path.commonpath([full, web_root]) != web_root:
+            return self._error(400, "bad path")
         if not os.path.isfile(full):
-            full = os.path.join(WEB_DIR, "index.html")  # SPA fallback
+            _, ext = os.path.splitext(full)
+            if ext.lower() in self._STATIC_EXTS:
+                return self._error(404, "not found")
+            full = os.path.join(web_root, "index.html")  # SPA fallback
         ctype, _ = mimetypes.guess_type(full)
         with open(full, "rb") as f:
             body = f.read()
@@ -297,6 +376,7 @@ class Handler(BaseHTTPRequestHandler):
             },
             "browser": check_chromium(),
             "offline": os.environ.get("NEXTCLAW_OFFLINE") == "1",
+            "token_source": self.ctx.token_source,  # 'env' or 'file'; rotation needs 'file'
         })
 
     def _api_quota(self, qs) -> None:
@@ -398,6 +478,26 @@ class Handler(BaseHTTPRequestHandler):
             self.ctx.approvals.audit("user", "task.cancel", task_id, {})
             return self._send_json({"task_id": task_id, "status": "cancelling"})
         self._error(404, "not found")
+
+    def _api_sse_ticket(self, qs) -> None:
+        # Issued only after Bearer auth (checked in _handle). Short-lived,
+        # single-use, and never the long-lived dashboard token.
+        self.ctx.rate.check(self.client_address[0], "sse_ticket")
+        self._send_json(self.ctx.issue_sse_ticket())
+
+    def _api_rotate_token(self, qs) -> None:
+        # Authenticated + rate-limited in _handle/above. Requires explicit
+        # confirmation in the body. Returns the new token ONCE; the caller
+        # must store it — it is never logged or returned again.
+        self.ctx.rate.check(self.client_address[0], "rotate_token")
+        body = _json_body(self)
+        if body.get("confirm") is not True:
+            raise ApiError(400, "rotation requires explicit confirmation")
+        auth = self.headers.get("Authorization", "")
+        presented = auth[7:].strip() if auth.startswith("Bearer ") else ""
+        new_token = self.ctx.rotate_token(presented)
+        self._send_json({"token": new_token,
+                         "message": "token rotated; the previous token is now invalid"})
 
     def _sse_events(self, task_id: str, qs) -> None:
         since = int((qs.get("since") or ["0"])[0])

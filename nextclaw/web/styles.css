@@ -213,3 +213,12 @@ pre.output {
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation: none; }
 }
+
+/* fatal error banner (global error reporting) */
+#fatal-error {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--bad-soft); color: var(--bad);
+  border-bottom: 2px solid var(--bad);
+  padding: 12px 18px; font-size: 14px;
+}

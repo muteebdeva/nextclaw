@@ -20,7 +20,7 @@ to SQLite so interrupted tasks resume instead of restarting.
 git clone https://github.com/muteebdeva/nextclaw.git
 cd nextclaw
 python3 -m nextclaw.cli init
-python3 -m unittest discover -s tests   # 44 tests, zero dependencies, no API key needed
+python3 -m unittest discover -s tests   # offline suite, no API key needed
 ```
 
 ## What makes it different
@@ -205,7 +205,7 @@ nextclaw/
     bench.py        # reproducible benchmark suite
     cli.py          # command-line interface
     cycle.py        # autonomous dev-cycle runner
-  tests/            # 142 tests, all offline (live test env-gated)
+  tests/            # offline unit suite (mocked) + env-gated live smoke tests
   docs/             # deployment guide + provider guide
   examples/demo.py  # self-contained end-to-end demo (temp dirs only)
   assets/           # logo, banner, social preview (SVG)
@@ -234,11 +234,29 @@ real keys).
 ## Testing
 
 ```bash
-python3 -m unittest discover -s tests          # full suite (142 tests), offline
-NEXTCLAW_LIVE_TESTS=1 python3 -m unittest tests.test_llm_live   # needs API key
+python3 -m unittest discover -s tests          # full offline suite (mocked; live tests auto-skip)
+python3 -m unittest tests.test_providers_live -v   # live provider smoke tests (needs config, see below)
+NEXTCLAW_LIVE_TESTS=1 python3 -m unittest tests.test_llm_live   # legacy live agent test, needs API key
 python3 examples/demo.py                        # end-to-end demo in temp dirs
 python3 -m nextclaw.cli bench                   # benchmark suite
 ```
+
+Test tiers:
+
+- **Unit tests** (`tests/`, offline): mocked providers, real HTTP against a
+  local test server, no network, no credentials. This is what CI runs.
+- **Live provider smoke tests** (`tests/test_providers_live.py`): call a real
+  configured provider — auth check, tiny generation, tool calling where
+  supported. Run only with `NEXTCLAW_LIVE_SMOKE=1` plus:
+  `NEXTCLAW_SMOKE_ADAPTER` (`openai_compat`/`anthropic`/`gemini`/`ollama`/`bedrock`),
+  `NEXTCLAW_SMOKE_MODEL`, and for cloud adapters `NEXTCLAW_SMOKE_API_KEY`
+  (`NEXTCLAW_SMOKE_BASE_URL` for custom/local endpoints). Without
+  configuration they report **skipped**, never passed. Keys are never logged.
+  Also runs weekly via `.github/workflows/live-smoke.yml` (plus manual
+  dispatch) using repository secrets.
+- **Skipped tests** are env-gated live tests, reported as skipped — not passed.
+
+Reproducible count: `python3 -m unittest discover -s tests 2>&1 | tail -3`
 
 CI runs the suite on Python 3.10–3.12. The live-model test is skipped by
 default so CI and contributors never burn quota.
