@@ -3,8 +3,14 @@
   "use strict";
 
   var API = "";
-  var token = localStorage.getItem("nc_token") || "";
-  var theme = localStorage.getItem("nc_theme") || "dark";
+  /* Storage may throw (blocked cookies/storage in webviews & private mode);
+     fall back to memory so the page never dies on boot. */
+  var memStore = {};
+  function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return memStore[k] || null; } }
+  function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { memStore[k] = v; } }
+  function storeDel(k) { try { localStorage.removeItem(k); } catch (e) { delete memStore[k]; } }
+  var token = storeGet("nc_token") || "";
+  var theme = storeGet("nc_theme") || "dark";
   document.documentElement.setAttribute("data-theme", theme);
 
   function esc(s) {
@@ -77,13 +83,13 @@
   /* ---------- auth / lock ---------- */
   function lock() {
     token = "";
-    localStorage.removeItem("nc_token");
+    storeDel("nc_token");
     document.getElementById("app").classList.add("hidden");
     document.getElementById("unlock").classList.remove("hidden");
   }
   function unlock(t) {
     token = t;
-    localStorage.setItem("nc_token", t);
+    storeSet("nc_token", t);
     document.getElementById("unlock").classList.add("hidden");
     document.getElementById("app").classList.remove("hidden");
     route();
@@ -108,7 +114,7 @@
   document.getElementById("theme-toggle").addEventListener("click", function () {
     theme = theme === "dark" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("nc_theme", theme);
+    storeSet("nc_theme", theme);
   });
 
   /* ---------- router ---------- */
