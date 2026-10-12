@@ -1,0 +1,5 @@
+=== 2026-10-12T12:34:33Z ===
+{"ok": true, "version": "0.2.0-dev", "time": 1791808473.8963826}
+token_fp: 1ce8b780196a05a2
+--- providers (keys masked by API) ---
+{"configs": [{"id": "pc_d4bb37187d51", "name": "gemini", "adapter": "gemini", "display_name": "Google Gemini (migrated)", "base_url": "", "model": "gemini-3.7-flash", "auth_kind": "api_key", "api_key_env": "NEXTCLAW_GEMINI_API_KEY", "extra_headers": {}, "extra_params": {}, "timeout_s": 60, "max_retries": 2, "allow_private": false, "compat_json_tools": false, "capabilities_override": {}, "enabled": true, "last_test_ok": null, "last_test_at": null, "last_test_error": "", "created_at": 1791808452.0136015, "updated_at": 1791808452.0136015, "api_key_masked": "env:NEXTCLAW_GEMINI_API_KEY", "has_aws_secret": false, "capabilities": {"tools": true, "streaming": false, "vision": true, "json_mode": false, "note": ""}}], "default_id": "pc_d4bb37187d51", "fallback_ids": []}
