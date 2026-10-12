@@ -1,0 +1,1 @@
+{"forwardPorts":[8765],"name":"nextclaw","portsAttributes":{"8765":{"label":"nextclaw dashboard","onAutoForward":"notify"}},"postCreateCommand":"bash .devcontainer/post-create.sh","postStartCommand":"bash .devcontainer/start-nextclaw.sh"}
