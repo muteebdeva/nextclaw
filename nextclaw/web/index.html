@@ -29,43 +29,80 @@
 
 <div id="app" class="hidden">
   <header id="topbar">
-    <button id="nav-toggle" class="icon-btn" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">
+    <button id="nav-toggle" class="icon-btn only-mobile" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">
       <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
     </button>
-    <div class="brand">
+    <div class="brand only-mobile">
       <svg class="claw" viewBox="0 0 256 256" aria-hidden="true"><path d="M70 48 L100 48 L78 208 L48 208 Z" fill="#2E5BFF"/><path d="M124 48 L154 48 L132 208 L102 208 Z" fill="#2E5BFF" opacity=".85"/><path d="M178 48 L208 48 L186 208 L156 208 Z" fill="#2E5BFF" opacity=".7"/></svg>
       <span>NextClaw</span>
     </div>
+    <button id="search-open" class="search-pill only-desktop" aria-label="Search (Ctrl+K)">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span>Search tasks, missions…</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <div class="topbar-spacer"></div>
+    <button id="topbar-search-m" class="icon-btn only-mobile" aria-label="Search">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+    <button class="icon-btn theme-toggle" aria-label="Toggle theme">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round" fill="none"/></svg>
+    </button>
     <a href="#/approvals" id="topbar-approvals" class="icon-btn" aria-label="Pending approvals">
-      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 9a6 6 0 1 1 12 0c0 5 2 6 2 6H4s2-1 2-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M10 20a2 2 0 0 0 4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       <span id="topbar-approval-badge" class="badge dot hidden"></span>
     </a>
+    <div class="avatar" title="Muteeb" aria-label="Signed in as Muteeb">M</div>
   </header>
   <div id="drawer-scrim" class="hidden" aria-hidden="true"></div>
   <aside class="sidebar" id="sidebar">
-    <div class="brand">
+    <div class="brand only-desktop">
       <svg class="claw" viewBox="0 0 256 256" aria-hidden="true"><path d="M70 48 L100 48 L78 208 L48 208 Z" fill="#2E5BFF"/><path d="M124 48 L154 48 L132 208 L102 208 Z" fill="#2E5BFF" opacity=".85"/><path d="M178 48 L208 48 L186 208 L156 208 Z" fill="#2E5BFF" opacity=".7"/></svg>
       <span>NextClaw</span>
     </div>
-    <div class="brand">
-      <svg class="claw" viewBox="0 0 256 256" aria-hidden="true"><path d="M70 48 L100 48 L78 208 L48 208 Z" fill="#2E5BFF"/><path d="M124 48 L154 48 L132 208 L102 208 Z" fill="#2E5BFF" opacity=".85"/><path d="M178 48 L208 48 L186 208 L156 208 Z" fill="#2E5BFF" opacity=".7"/></svg>
-      <span>NextClaw</span>
-    </div>
-    <nav aria-label="Main">
-      <a href="#/overview" data-nav="overview">Overview</a>
-      <a href="#/tasks" data-nav="tasks">Tasks</a>
-      <a href="#/agents" data-nav="agents">Multi-Agent</a>
-      <a href="#/approvals" data-nav="approvals">Approvals <span id="nav-approval-badge" class="badge hidden"></span></a>
-      <a href="#/scheduler" data-nav="scheduler">Scheduler</a>
-      <a href="#/providers" data-nav="providers">Providers</a>
-      <a href="#/settings" data-nav="settings">Settings</a>
-    </nav>
+    <nav aria-label="Main" id="main-nav"></nav>
     <div class="sidebar-foot">
-      <button id="theme-toggle" class="btn ghost" aria-label="Toggle theme">Theme</button>
       <button id="lock-btn" class="btn ghost" aria-label="Lock dashboard">Lock</button>
     </div>
   </aside>
-  <main id="view" tabindex="-1"></main>
+  <div id="content">
+    <main id="view" tabindex="-1"></main>
+  </div>
+</div>
+
+<nav id="tabbar" class="hidden" aria-label="Primary">
+  <a href="#/overview" data-tab="overview">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round" fill="none"/></svg>
+    <span>Home</span>
+  </a>
+  <button id="tab-new" aria-label="New mission">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" fill="none"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <span>New</span>
+  </button>
+  <a href="#/agents" data-tab="agents">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="8" cy="8" r="3.5" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="16.5" cy="9.5" r="2.5" stroke="currentColor" stroke-width="2" fill="none"/><path d="M2.5 20c.8-3.4 3-5 5.5-5s4.7 1.6 5.5 5M14 15.6c2.3.3 4.2 1.7 5 4.4" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
+    <span>Agents</span>
+  </a>
+  <a href="#/tasks" data-tab="tasks">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4" cy="6" r="1.4" fill="currentColor"/><circle cx="4" cy="12" r="1.4" fill="currentColor"/><circle cx="4" cy="18" r="1.4" fill="currentColor"/></svg>
+    <span>Tasks</span>
+  </a>
+  <button id="tab-more" aria-label="More navigation" aria-expanded="false" aria-controls="sidebar">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="5" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="19" cy="12" r="1.6" fill="currentColor"/></svg>
+    <span>More</span>
+  </button>
+</nav>
+
+<div id="search-overlay" class="hidden" role="dialog" aria-label="Search">
+  <div class="search-backdrop" id="search-backdrop"></div>
+  <div class="search-box" role="document">
+    <div class="search-input-row">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <input id="search-input" type="text" placeholder="Search tasks, missions, pages…" autocomplete="off" aria-label="Search">
+      <kbd>esc</kbd>
+    </div>
+    <div id="search-results"></div>
+  </div>
 </div>
 
 <div id="toasts" aria-live="polite"></div>

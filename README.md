@@ -46,24 +46,34 @@ python3 -m nextclaw.cli serve
 # → http://127.0.0.1:8765  (paste the printed API token to unlock)
 ```
 
-- **Overview** — mission control: prominent New Mission action, live active
-  work with current steps, needs-attention (pending approvals, failed
-  tasks), recent results with verification flags, quota, scheduler,
-  provider health
-- **Tasks** — create (deterministic or model-driven), filter, inspect the
-  execution timeline, tool calls with arguments/outputs, and verification
-  evidence; cancel or resume from checkpoints. Failed tasks show a
+- **Overview** — welcome header, stat cards (active missions, pending
+  approvals, API quota with usage bar, success rate, next scheduled run),
+  mission cards with stage pipelines and agent status, recent tasks,
+  providers with connectivity status, and a System Health panel backed by
+  real probes (database, task runner, browser, scheduler, Telegram)
+- **Tasks** — create (deterministic or model-driven), filter, inspect via
+  tabs (Overview / Execution / Logs / Verification); failed tasks show a
   classified diagnosis (timeout, auth, provider, verification, step
-  failure) instead of a raw error string
+  failure) instead of a raw error string; cancel or resume from checkpoints
 - **Multi-Agent** — launch delegated missions across specialist worker
-  agents, monitor the dependency graph live, inspect worker outputs,
-  cancel or retry failed subtasks, enable/disable delegation
+  agents, watch the plan as a stage DAG with per-worker status, inspect
+  worker outputs and logs, browse artifacts, cancel or retry failed
+  subtasks, enable/disable delegation
 - **Approvals** — pending high-risk actions with full context; approve or
   reject; every decision lands in the audit log
 - **Scheduler** — jobs, next runs, run history, enable/disable/run-now
 - **Providers** — Gemini/Ollama status, connectivity tests, safe config
   (keys stay in environment variables and are never shown)
-- **Settings** — workspace, execution limits, permission policy, theme
+- **Tools** — the registered tool inventory with risk levels and approval
+  requirements
+- **Memory** — searchable read-only browser over what agents remember
+- **Settings** — workspace, execution limits, permission policy, theme,
+  API token rotation
+
+Top bar: global search (⌘K / /) across tasks, missions, and pages,
+theme toggle, approval notifications, and a bottom tab bar on mobile
+(Home / New / Agents / Tasks / More). Every number, status, and label is
+read from the live API — nothing is mocked.
 
 The UI is a dependency-free single-page app (`nextclaw/web/`) backed by a
 JSON API (`nextclaw/server.py`, stdlib only) with Bearer-token auth,

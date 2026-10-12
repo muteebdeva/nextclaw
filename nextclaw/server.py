@@ -427,7 +427,40 @@ class Handler(BaseHTTPRequestHandler):
             "browser": check_chromium(),
             "offline": os.environ.get("NEXTCLAW_OFFLINE") == "1",
             "token_source": self.ctx.token_source,  # 'env' or 'file'; rotation needs 'file'
+            "health": self._health_snapshot(),
         })
+
+    def _health_snapshot(self) -> Dict[str, Any]:
+        """Real component health probes for the dashboard System Health panel."""
+        snap: Dict[str, Any] = {}
+        # Database: can we actually read tasks.db?
+        try:
+            import sqlite3
+            conn = sqlite3.connect(os.path.join(self.ctx.cfg.data_dir, "tasks.db"), timeout=5.0)
+            try:
+                conn.execute("SELECT 1").fetchone()
+                snap["database"] = {"ok": True, "label": "Online"}
+            finally:
+                conn.close()
+        except Exception as exc:
+            snap["database"] = {"ok": False, "label": "Unreachable", "error": str(exc)[:120]}
+        # Task runner: in-process executor; reachable iff the API answered.
+        snap["task_runner"] = {"ok": True, "label": "Online"}
+        # Scheduler: report stored job counts (scheduler runs via CLI, not in-process).
+        try:
+            from .scheduler import SchedulerStore
+            jobs = SchedulerStore(self.ctx.cfg.data_dir).list_jobs()
+            enabled = sum(1 for j in jobs if j.get("enabled"))
+            snap["scheduler"] = {"ok": True, "label": f"{len(jobs)} jobs ({enabled} enabled)"}
+        except Exception as exc:
+            snap["scheduler"] = {"ok": False, "label": "Error", "error": str(exc)[:120]}
+        # Telegram: opt-in channel; report configured/not configured (never probe the network here).
+        snap["telegram"] = (
+            {"ok": True, "label": "Configured"}
+            if os.environ.get("NEXTCLAW_TELEGRAM_BOT_TOKEN") else
+            {"ok": None, "label": "Not configured"}
+        )
+        return snap
 
     def _api_quota(self, qs) -> None:
         from . import llm as llm_mod
