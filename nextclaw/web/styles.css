@@ -330,6 +330,13 @@ a.rowlink-block:hover { background: var(--surface-2); }
   table.rtable td.no-label { justify-content: flex-end; }
 }
 
+/* laptop: keep 4-up stat grids and wide tables breathing room */
+@media (max-width: 1150px) {
+  .grid.cols-4 { grid-template-columns: repeat(2, 1fr); }
+  #view { padding: 24px; }
+}
+td { overflow-wrap: break-word; }
+
 /* drawer behavior */
 @media (max-width: 900px) {
   #topbar { display: flex; }
