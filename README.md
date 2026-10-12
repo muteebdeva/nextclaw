@@ -6,6 +6,7 @@
   <a href="https://github.com/muteebdeva/nextclaw/actions/workflows/ci.yml"><img src="https://github.com/muteebdeva/nextclaw/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero dependencies">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
 </p>
 
 # NextClaw
@@ -280,8 +281,7 @@ tools and providers, and the no-fabrication rule: every claim needs a test.
 
 ## License
 
-The license is being finalized (MIT proposed). Until `LICENSE` lands, all
-rights are reserved by the repository owner.
+MIT — see [LICENSE](LICENSE).
 
 ---
 

@@ -4,12 +4,12 @@ version = "0.1.0"
 description = "The reliability-first AI agent platform: verified execution, persistent tasks, permission-checked tools."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "TBD" }
+license = { text = "MIT" }
 authors = [{ name = "Muteeb Deva" }]
 keywords = ["ai", "agents", "llm", "automation"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 dependencies = []
