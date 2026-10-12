@@ -2,7 +2,8 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0e14">
 <title>NextClaw Dashboard</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Crect width='256' height='256' rx='58' fill='%230B0E14'/%3E%3Cpath d='M70 48 L100 48 L78 208 L48 208 Z' fill='%232E5BFF'/%3E%3Cpath d='M124 48 L154 48 L132 208 L102 208 Z' fill='%232E5BFF' opacity='.85'/%3E%3Cpath d='M178 48 L208 48 L186 208 L156 208 Z' fill='%232E5BFF' opacity='.7'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
@@ -27,7 +28,25 @@
 </div>
 
 <div id="app" class="hidden">
-  <aside class="sidebar">
+  <header id="topbar">
+    <button id="nav-toggle" class="icon-btn" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+    <div class="brand">
+      <svg class="claw" viewBox="0 0 256 256" aria-hidden="true"><path d="M70 48 L100 48 L78 208 L48 208 Z" fill="#2E5BFF"/><path d="M124 48 L154 48 L132 208 L102 208 Z" fill="#2E5BFF" opacity=".85"/><path d="M178 48 L208 48 L186 208 L156 208 Z" fill="#2E5BFF" opacity=".7"/></svg>
+      <span>NextClaw</span>
+    </div>
+    <a href="#/approvals" id="topbar-approvals" class="icon-btn" aria-label="Pending approvals">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+      <span id="topbar-approval-badge" class="badge dot hidden"></span>
+    </a>
+  </header>
+  <div id="drawer-scrim" class="hidden" aria-hidden="true"></div>
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <svg class="claw" viewBox="0 0 256 256" aria-hidden="true"><path d="M70 48 L100 48 L78 208 L48 208 Z" fill="#2E5BFF"/><path d="M124 48 L154 48 L132 208 L102 208 Z" fill="#2E5BFF" opacity=".85"/><path d="M178 48 L208 48 L186 208 L156 208 Z" fill="#2E5BFF" opacity=".7"/></svg>
+      <span>NextClaw</span>
+    </div>
     <div class="brand">
       <svg class="claw" viewBox="0 0 256 256" aria-hidden="true"><path d="M70 48 L100 48 L78 208 L48 208 Z" fill="#2E5BFF"/><path d="M124 48 L154 48 L132 208 L102 208 Z" fill="#2E5BFF" opacity=".85"/><path d="M178 48 L208 48 L186 208 L156 208 Z" fill="#2E5BFF" opacity=".7"/></svg>
       <span>NextClaw</span>

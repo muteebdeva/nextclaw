@@ -46,10 +46,15 @@ python3 -m nextclaw.cli serve
 # → http://127.0.0.1:8765  (paste the printed API token to unlock)
 ```
 
-- **Overview** — task stats, pending approvals, quota, next scheduled run
+- **Overview** — mission control: prominent New Mission action, live active
+  work with current steps, needs-attention (pending approvals, failed
+  tasks), recent results with verification flags, quota, scheduler,
+  provider health
 - **Tasks** — create (deterministic or model-driven), filter, inspect the
   execution timeline, tool calls with arguments/outputs, and verification
-  evidence; cancel or resume from checkpoints
+  evidence; cancel or resume from checkpoints. Failed tasks show a
+  classified diagnosis (timeout, auth, provider, verification, step
+  failure) instead of a raw error string
 - **Multi-Agent** — launch delegated missions across specialist worker
   agents, monitor the dependency graph live, inspect worker outputs,
   cancel or retry failed subtasks, enable/disable delegation

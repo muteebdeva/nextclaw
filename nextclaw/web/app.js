@@ -77,16 +77,29 @@
     opts = opts || {};
     var headers = { "Content-Type": "application/json" };
     if (token) headers["Authorization"] = "Bearer " + token;
+    var ctrl = null, timer = null;
+    try {
+      ctrl = new AbortController();
+      timer = setTimeout(function () { ctrl.abort(); }, 30000);
+    } catch (e) { /* older browsers: no timeout */ }
     return fetch(API + path, {
       method: opts.method || "GET",
       headers: headers,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: ctrl ? ctrl.signal : undefined,
     }).then(function (r) {
+      if (timer) clearTimeout(timer);
       if (r.status === 401) { lock(); throw new Error("unauthorized"); }
       return r.json().then(function (j) {
         if (!r.ok) throw new Error((j && j.error) || ("HTTP " + r.status));
         return j;
       });
+    }).catch(function (e) {
+      if (timer) clearTimeout(timer);
+      if (e && e.name === "AbortError") {
+        throw new Error("request timed out — the server took too long to respond");
+      }
+      throw e;
     });
   }
 
@@ -152,7 +165,32 @@
   document.getElementById("theme-toggle").addEventListener("click", function () {
     theme = theme === "dark" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", theme);
+    document.querySelector('meta[name="theme-color"]')
+      .setAttribute("content", theme === "dark" ? "#0b0e14" : "#f4f6fb");
     storeSet("nc_theme", theme);
+  });
+
+  /* ---------- mobile drawer ---------- */
+  var navToggle = document.getElementById("nav-toggle");
+  var drawerScrim = document.getElementById("drawer-scrim");
+  function closeDrawer() {
+    document.getElementById("app").classList.remove("drawer-open");
+    navToggle.setAttribute("aria-expanded", "false");
+    drawerScrim.classList.add("hidden");
+  }
+  navToggle.addEventListener("click", function () {
+    var open = document.getElementById("app").classList.toggle("drawer-open");
+    navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    drawerScrim.classList.toggle("hidden", !open);
+    if (open) {
+      var first = document.querySelector(".sidebar nav a.active") ||
+        document.querySelector(".sidebar nav a");
+      if (first) first.focus();
+    }
+  });
+  drawerScrim.addEventListener("click", closeDrawer);
+  document.querySelectorAll(".sidebar nav a").forEach(function (a) {
+    a.addEventListener("click", closeDrawer);
   });
 
   /* ---------- router ---------- */
@@ -165,6 +203,7 @@
     });
     stopSse();
     stopDelegPoll();
+    if (typeof closeDrawer === "function") closeDrawer();
     var m = hash.match(/^#\/tasks\/([a-z0-9]+)$/);
     if (m) return renderTaskDetail(m[1]);
     var m2 = hash.match(/^#\/agents\/([a-z0-9_]+)$/);
@@ -186,8 +225,14 @@
     if (!token) return;
     api("/api/approvals?status=pending").then(function (d) {
       var b = document.getElementById("nav-approval-badge");
-      if (d.approvals.length) { b.textContent = d.approvals.length; b.classList.remove("hidden"); }
-      else b.classList.add("hidden");
+      var td = document.getElementById("topbar-approval-badge");
+      if (d.approvals.length) {
+        b.textContent = d.approvals.length; b.classList.remove("hidden");
+        td.classList.remove("hidden");
+      } else {
+        b.classList.add("hidden");
+        td.classList.add("hidden");
+      }
     }).catch(function () {});
   }
   setInterval(refreshApprovalBadge, 15000);
@@ -229,32 +274,148 @@
   function renderOverview() {
     loading(view);
     Promise.all([
-      api("/api/status"), api("/api/tasks?limit=8"), api("/api/quota"),
-      api("/api/scheduler/jobs"), api("/api/approvals?status=pending"),
+      api("/api/status"), api("/api/tasks?limit=50"), api("/api/delegations"),
+      api("/api/approvals?status=pending"), api("/api/quota"),
+      api("/api/scheduler/jobs"),
     ]).then(function (r) {
-      var status = r[0], tasks = r[1].tasks, quota = r[2], jobs = r[3].jobs, pending = r[4].approvals;
-      var counts = {};
-      tasks.forEach(function (t) { counts[t.status] = (counts[t.status] || 0) + 1; });
+      var status = r[0], tasks = r[1].tasks, delegations = r[2].delegations,
+          pending = r[3].approvals, quota = r[4], jobs = r[5].jobs;
+      var active = tasks.filter(function (t) {
+        return t.status === "running" || t.status === "awaiting_approval" || t.status === "queued";
+      });
+      var failed = tasks.filter(function (t) { return t.status === "failed"; }).slice(0, 5);
+      var recentDone = tasks.filter(function (t) { return t.status === "completed"; }).slice(0, 6);
+      var activeDeleg = delegations.filter(function (m) {
+        return m.status === "created" || m.status === "running" || m.status === "verifying";
+      });
       var nextJob = jobs.filter(function (j) { return j.enabled; })
         .sort(function (a, b) { return (a.next_run_at || 9e15) - (b.next_run_at || 9e15); })[0];
+
       view.innerHTML =
-        '<div class="page-head"><div><h1>Overview</h1><p>What your agents are doing right now.</p></div>' +
-        '<button class="btn primary" id="new-task-btn">New task</button></div>' +
+        '<div class="hero"><div><h2>Mission control</h2>' +
+        "<p>Launch autonomous work, watch agents execute, verify the results.</p></div>" +
+        '<button class="btn primary" id="ov-new">New mission</button></div>' +
+
+        '<div class="card" style="margin-bottom:16px"><h3 class="row-head">Active work ' +
+        '<span class="stat-sub">' + active.length + " task(s) · " + activeDeleg.length + " delegation(s)</span></h3>" +
+        '<div id="ov-active">' + activeWorkHtml(active, activeDeleg) + "</div></div>" +
+
+        '<div class="grid cols-2" style="margin-bottom:16px">' +
+        '<div class="card"><h3 class="row-head">Needs attention <a href="#/approvals">Approvals →</a></h3>' +
+        attentionHtml(pending, failed) + "</div>" +
+        '<div class="card"><h3 class="row-head">Recent results <a href="#/tasks">Tasks →</a></h3>' +
+        (recentDone.length ? '<ul class="rows" id="ov-recent">' + recentDone.map(recentRow).join("") + "</ul>"
+          : '<div class="result-empty">No completed tasks yet.</div>') + "</div>" +
+        "</div>" +
+
         '<div class="grid cols-4">' +
-        statCard("Tasks (recent)", tasks.length, Object.keys(counts).map(function (k) { return k + ": " + counts[k]; }).join(" · ") || "none yet") +
-        statCard("Pending approvals", pending.length, pending.length ? "action needed" : "all clear") +
         statCard("API quota today", quota.daily_used + " / " + quota.daily_cap,
           quota.cooldown_active ? "cooldown: " + quota.cooldown_left_s + "s left" : "healthy") +
-        statCard("Next scheduled run", nextJob ? ago(nextJob.next_run_at) : "none",
+        statCard("Next scheduled run", nextJob ? fmtTime(nextJob.next_run_at) : "none",
           nextJob ? esc(nextJob.name) : "scheduler idle") +
-        "</div>" +
-        '<div class="grid cols-2" style="margin-top:16px">' +
-        '<div class="card"><h3>Recent tasks</h3>' + taskTable(tasks.slice(0, 6), true) + "</div>" +
-        '<div class="card"><h3>Providers</h3>' + providerSummary(status.providers) +
-        '<div class="toolbar" style="margin-top:12px"><a class="btn small" href="#/providers">Configure</a></div></div>' +
+        statCard("Providers", status.providers.count + " configured",
+          (status.providers.default_name ? esc(status.providers.default_name) + " · default" : "no default") +
+          (status.browser && status.browser.available ? " · browser ok" : "")) +
+        statCard("Verification", "—", "checking recent tasks…") +
         "</div>";
-      document.getElementById("new-task-btn").addEventListener("click", newTaskModal);
+      document.getElementById("ov-new").addEventListener("click", newTaskModal);
+      enhanceOverview(active.slice(0, 3), recentDone.slice(0, 4));
     }).catch(function (e) { showError(view, e); });
+  }
+
+  function activeWorkHtml(active, activeDeleg) {
+    var html = "";
+    if (!active.length && !activeDeleg.length) {
+      return '<div class="result-empty">Nothing running right now. Launch a mission to put agents to work.</div>';
+    }
+    active.forEach(function (t) {
+      html += '<li><a class="rowlink-block" href="#/tasks/' + esc(t.id) + '">' +
+        '<div class="r-main">' + pill(t.status) +
+        '<span class="r-title">' + esc(t.goal.length > 80 ? t.goal.slice(0, 80) + "…" : t.goal) + "</span></div>" +
+        '<div class="r-sub" data-step="' + esc(t.id) + '">loading current step…</div></a></li>';
+    });
+    activeDeleg.forEach(function (m) {
+      var done = (m.subtask_counts && m.subtask_counts.completed) || 0;
+      html += '<li><a class="rowlink-block" href="#/agents/' + esc(m.mission_id) + '">' +
+        '<div class="r-main">' + pill(m.status) +
+        '<span class="r-title">🤖 ' + esc(m.goal.length > 80 ? m.goal.slice(0, 80) + "…" : m.goal) + "</span></div>" +
+        '<div class="r-sub">multi-agent · ' + done + "/" + m.subtasks_total + " subtasks · " + esc(ago(m.updated_at)) + "</div></a></li>";
+    });
+    return '<ul class="rows">' + html + "</ul>";
+  }
+
+  function attentionHtml(pending, failed) {
+    var html = "";
+    if (!pending.length && !failed.length) {
+      return '<div class="result-empty">All clear — no approvals waiting, no failed tasks.</div>';
+    }
+    pending.slice(0, 4).forEach(function (a) {
+      html += '<li><div class="r-main">' + pill("awaiting_approval") +
+        '<span class="r-title">' + esc((a.summary || a.tool || "approval").slice(0, 70)) + "</span></div>" +
+        '<div class="r-sub">task <span class="mono">' + esc(String(a.task_id || "").slice(0, 8)) + "</span></div></li>";
+    });
+    failed.forEach(function (t) {
+      html += '<li><a class="rowlink-block" href="#/tasks/' + esc(t.id) + '">' +
+        '<div class="r-main">' + pill("failed") +
+        '<span class="r-title">' + esc(t.goal.length > 70 ? t.goal.slice(0, 70) + "…" : t.goal) + "</span></div>" +
+        '<div class="r-sub">' + esc((t.error || "failed").slice(0, 90)) + "</div></a></li>";
+    });
+    return '<ul class="rows">' + html + "</ul>";
+  }
+
+  function recentRow(t) {
+    return '<li><a class="rowlink-block" href="#/tasks/' + esc(t.id) + '">' +
+      '<div class="r-main">' + pill(t.status) +
+      '<span class="r-title">' + esc(t.goal.length > 70 ? t.goal.slice(0, 70) + "…" : t.goal) + "</span></div>" +
+      '<div class="r-sub" data-verify="' + esc(t.id) + '">' + esc(ago(t.updated_at)) + "</div></a></li>";
+  }
+
+  /* Second-phase enhancement: current steps for active tasks, verification
+     flags for recent ones. Bounded, real data only. */
+  function enhanceOverview(activeTasks, recentTasks) {
+    activeTasks.forEach(function (t) {
+      api("/api/tasks/" + t.id).then(function (d) {
+        var el = document.querySelector('[data-step="' + t.id + '"]');
+        if (!el) return;
+        var steps = d.steps || [];
+        var cur = null;
+        for (var i = steps.length - 1; i >= 0; i--) {
+          if (steps[i].status === "running" || steps[i].status === "pending") { cur = steps[i]; break; }
+        }
+        if (!cur && steps.length) cur = steps[steps.length - 1];
+        el.textContent = cur
+          ? "current step: " + cur.name + " (" + cur.status.replace(/_/g, " ") + ")"
+          : "queued — waiting to start";
+      }).catch(function () {
+        var el = document.querySelector('[data-step="' + t.id + '"]');
+        if (el) el.textContent = "step info unavailable";
+      });
+    });
+    var verified = 0, checked = 0;
+    if (!recentTasks.length) { setVerifyStat(0, 0); return; }
+    recentTasks.forEach(function (t) {
+      api("/api/tasks/" + t.id).then(function (d) {
+        checked++;
+        var v = d.result && d.result.verified;
+        if (v) verified++;
+        var el = document.querySelector('[data-verify="' + t.id + '"]');
+        if (el) el.innerHTML = esc(ago(t.updated_at)) + " · " +
+          (v ? '<span class="pill done">verified</span>' : '<span class="pill queued">unverified</span>');
+        if (checked === recentTasks.length) setVerifyStat(verified, checked);
+      }).catch(function () {
+        checked++;
+        if (checked === recentTasks.length) setVerifyStat(verified, checked);
+      });
+    });
+  }
+
+  function setVerifyStat(verified, checked) {
+    var cards = document.querySelectorAll("#view .grid.cols-4 .card");
+    var last = cards[cards.length - 1];
+    if (!last) return;
+    last.querySelector(".stat").textContent = checked ? verified + " / " + checked : "—";
+    last.querySelector(".stat-sub").textContent = checked
+      ? "of recent tasks passed verification" : "no completed tasks yet";
   }
 
   function statCard(label, value, sub) {
@@ -289,13 +450,13 @@
     if (!tasks.length) return '<div class="empty"><h3>No tasks yet</h3><p>Create one to get started.</p></div>';
     var rows = tasks.map(function (t) {
       return "<tr class='rowlink' data-tid='" + esc(t.id) + "' tabindex='0'>" +
-        "<td class='mono'>" + esc(t.id.slice(0, 8)) + "</td>" +
-        "<td>" + esc(t.goal.length > 60 ? t.goal.slice(0, 60) + "…" : t.goal) + "</td>" +
-        (compact ? "" : "<td class='mono'>" + esc(t.task_type) + "</td>") +
-        "<td>" + pill(t.status) + "</td>" +
-        "<td class='stat-sub'>" + esc(ago(t.updated_at)) + "</td></tr>";
+        "<td class='mono' data-th='ID'>" + esc(t.id.slice(0, 8)) + "</td>" +
+        "<td data-th='Goal'>" + esc(t.goal.length > 60 ? t.goal.slice(0, 60) + "…" : t.goal) + "</td>" +
+        (compact ? "" : "<td class='mono' data-th='Type'>" + esc(t.task_type) + "</td>") +
+        "<td data-th='Status'>" + pill(t.status) + "</td>" +
+        "<td class='stat-sub' data-th='Updated'>" + esc(ago(t.updated_at)) + "</td></tr>";
     }).join("");
-    return "<table><thead><tr><th>ID</th><th>Goal</th>" + (compact ? "" : "<th>Type</th>") +
+    return "<table class='rtable'><thead><tr><th>ID</th><th>Goal</th>" + (compact ? "" : "<th>Type</th>") +
       "<th>Status</th><th>Updated</th></tr></thead><tbody>" + rows + "</tbody></table>";
   }
 
@@ -340,64 +501,187 @@
     }).catch(function (e) { showError(view, e); });
   }
 
+  /* Supported deterministic task types and their required params.
+     Only these exist in the backend (models.py); nothing else is offered. */
+  var TASK_TYPES = {
+    file_report: { label: "File report", desc: "Inventory files matching a pattern, with a verified report.",
+      required: ["root", "pattern", "output"],
+      example: { root: ".", pattern: "**/*.py", output: "report.md" } },
+    file_write: { label: "File write", desc: "Write content to a file, verified by hash.",
+      required: ["path", "content"],
+      example: { path: "notes/todo.md", content: "# Todo\n" } },
+    browser_research: { label: "Web research", desc: "Fetch a page and save a verified research report.",
+      required: ["url", "output"],
+      example: { url: "https://example.com", output: "research.md" } },
+  };
+
   function newTaskModal() {
     modal(
-      "<h2>New task</h2>" +
-      '<p class="stat-sub">Deterministic tasks run offline with explicit verification. ' +
-      "Agent tasks use the configured model provider.</p>" +
+      "<h2>New mission</h2>" +
+      '<p class="stat-sub">Deterministic missions run offline with explicit verification. ' +
+      "Model-driven missions use the configured provider. For team work, " +
+      '<a href="#/agents">launch a multi-agent mission</a>.</p>' +
       '<label class="field"><span>Goal</span>' +
-      '<textarea id="nt-goal" rows="3" placeholder="What should the agent accomplish?"></textarea></label>' +
+      '<textarea id="nt-goal" rows="3" placeholder="What should the agent accomplish?"></textarea>' +
+      '<span class="field-err hidden" id="nt-goal-err"></span></label>' +
       '<div class="grid cols-2">' +
-      '<label class="field"><span>Mode</span><select id="nt-mode">' +
+      '<label class="field"><span>Execution mode</span><select id="nt-mode">' +
       '<option value="run">Deterministic (offline)</option><option value="run-agent">Model-driven</option>' +
       "</select></label>" +
-      '<label class="field"><span>Task type</span><select id="nt-type">' +
-      '<option value="file_report">file_report — verified file inventory</option>' +
-      '<option value="file_write">file_write — verified file creation</option>' +
-      '<option value="workspace_inspect">workspace_inspect — verified listing</option>' +
-      "</select></label></div>" +
-      '<label class="field"><span>Parameters (JSON)</span>' +
-      '<textarea id="nt-params" rows="3" class="mono" placeholder=\'{"root": ".", "pattern": "**/*.py", "output": "report.md"}\'></textarea></label>' +
+      '<label class="field"><span>Mission type</span><select id="nt-type">' +
+      Object.keys(TASK_TYPES).map(function (k) {
+        return '<option value="' + k + '">' + TASK_TYPES[k].label + "</option>";
+      }).join("") + "</select>" +
+      '<span class="stat-sub" id="nt-type-desc"></span></label></div>' +
+      '<details class="adv"><summary>Advanced parameters</summary>' +
+      '<label class="field"><span>Parameters (JSON) — required: <span class="mono" id="nt-req"></span></span>' +
+      '<textarea id="nt-params" rows="4" class="mono" spellcheck="false"></textarea>' +
+      '<span class="field-err hidden" id="nt-params-err"></span></label></details>' +
       '<div id="nt-error" class="error hidden"></div>' +
       '<div class="actions"><button class="btn ghost" id="nt-cancel">Cancel</button>' +
       '<button class="btn primary" id="nt-create">Create &amp; run</button></div>'
     );
-    document.getElementById("nt-mode").addEventListener("change", function (e) {
-      document.getElementById("nt-type").disabled = e.target.value === "run-agent";
-    });
+    var modeSel = document.getElementById("nt-mode");
+    var typeSel = document.getElementById("nt-type");
+    var typeDesc = document.getElementById("nt-type-desc");
+    var reqEl = document.getElementById("nt-req");
+    var paramsEl = document.getElementById("nt-params");
+    function syncType() {
+      var tt = TASK_TYPES[typeSel.value];
+      typeDesc.textContent = tt.desc;
+      reqEl.textContent = tt.required.join(", ");
+      paramsEl.placeholder = JSON.stringify(tt.example, null, 2);
+      var isAgent = modeSel.value === "run-agent";
+      typeSel.disabled = isAgent;
+      paramsEl.disabled = isAgent;
+      paramsEl.closest("details").style.opacity = isAgent ? ".45" : "1";
+    }
+    modeSel.addEventListener("change", syncType);
+    typeSel.addEventListener("change", syncType);
+    syncType();
+    function fieldErr(id, msg) {
+      var el = document.getElementById(id);
+      if (msg) { el.textContent = msg; el.classList.remove("hidden"); }
+      else el.classList.add("hidden");
+    }
     document.getElementById("nt-cancel").addEventListener("click", closeModal);
-    document.getElementById("nt-create").addEventListener("click", function () {
+    var createBtn = document.getElementById("nt-create");
+    var inFlight = false;
+    createBtn.addEventListener("click", function () {
+      if (inFlight) return; // duplicate-submission prevention
       var errEl = document.getElementById("nt-error");
-      var params = {};
-      var raw = document.getElementById("nt-params").value.trim();
-      if (raw) {
+      errEl.classList.add("hidden");
+      var goal = document.getElementById("nt-goal").value.trim();
+      if (!goal) { fieldErr("nt-goal-err", "Describe the goal first."); return; }
+      fieldErr("nt-goal-err", null);
+      var mode = modeSel.value, params = {};
+      if (mode === "run") {
+        var raw = paramsEl.value.trim();
+        if (!raw) {
+          fieldErr("nt-params-err", "Parameters are required for deterministic missions. See the example above.");
+          return;
+        }
         try { params = JSON.parse(raw); }
-        catch (e) { errEl.textContent = "Parameters are not valid JSON."; errEl.classList.remove("hidden"); return; }
+        catch (e) { fieldErr("nt-params-err", "Not valid JSON: " + e.message); return; }
+        if (typeof params !== "object" || Array.isArray(params)) {
+          fieldErr("nt-params-err", "Parameters must be a JSON object."); return;
+        }
+        var missing = TASK_TYPES[typeSel.value].required.filter(function (k) { return !(k in params); });
+        if (missing.length) {
+          fieldErr("nt-params-err", "Missing required parameter(s): " + missing.join(", ")); return;
+        }
+        fieldErr("nt-params-err", null);
       }
-      var body = {
-        goal: document.getElementById("nt-goal").value.trim(),
-        mode: document.getElementById("nt-mode").value,
-        task_type: document.getElementById("nt-type").value,
-        params: params,
-      };
-      if (!body.goal) { errEl.textContent = "Describe the goal first."; errEl.classList.remove("hidden"); return; }
-      api("/api/tasks", { method: "POST", body: body }).then(function (d) {
+      inFlight = true;
+      createBtn.disabled = true;
+      createBtn.innerHTML = '<span class="spinner inline" aria-hidden="true"></span> Creating…';
+      api("/api/tasks", {
+        method: "POST",
+        body: { goal: goal, mode: mode, task_type: typeSel.value, params: params },
+      }).then(function (d) {
         closeModal();
-        toast("Task created: " + d.task_id.slice(0, 8), "ok");
+        toast("Mission created", "ok");
         location.hash = "#/tasks/" + d.task_id;
       }).catch(function (e) {
-        errEl.textContent = e.message; errEl.classList.remove("hidden");
+        inFlight = false;
+        createBtn.disabled = false;
+        createBtn.textContent = "Create & run";
+        errEl.textContent = e.message +
+          (e.message.indexOf("timed out") !== -1 ? " — the mission may still have been created; check Tasks before retrying." : "");
+        errEl.classList.remove("hidden");
       });
     });
   }
 
   /* ---------- task detail ---------- */
+  function classifyError(err) {
+    var e = String(err || "");
+    if (!e) return null;
+    var l = e.toLowerCase();
+    if (/timed?\s?out|deadline exceeded|read timeout/.test(l))
+      return { kind: "timeout", label: "Timeout",
+        title: "The task timed out",
+        hint: "A step exceeded its time budget. Resuming re-runs from the last checkpoint — usually safe." };
+    if (/401|unauthorized|forbidden|invalid api key|authentication|auth failed|bad credentials/.test(l))
+      return { kind: "auth", label: "Authentication",
+        title: "Authentication failed",
+        hint: "The provider rejected the credentials. Check the key in Providers — auth errors are never retried automatically." };
+    if (/429|rate.?limit|quota|cooldown|insufficient_quota|resource_exhausted/.test(l))
+      return { kind: "provider", label: "Rate limit",
+        title: "Provider rate limit or quota",
+        hint: "The provider refused the request. Wait out the cooldown or switch the default provider." };
+    if (/connection|network|dns|econnrefused|econnreset|socket|provider|model not found|overloaded|503|502/.test(l))
+      return { kind: "provider", label: "Provider error",
+        title: "The model provider failed",
+        hint: "The request never completed. Fallback providers are tried automatically where configured." };
+    if (/verif|acceptance|criterion not met|unmet/.test(l))
+      return { kind: "verification", label: "Verification",
+        title: "Verification failed",
+        hint: "The work finished but acceptance criteria were not met. Inspect the evidence before retrying." };
+    return { kind: "tool", label: "Step failure",
+      title: "A step failed",
+      hint: "A tool call or execution step returned an error. The failed step is highlighted in the timeline." };
+  }
+
   function renderTaskDetail(taskId) {
     loading(view);
     api("/api/tasks/" + taskId).then(function (t) {
+      var diag = classifyError(t.error);
+      var failedStep = null;
+      (t.steps || []).forEach(function (s) { if (s.status === "failed") failedStep = s; });
+      var resumes = (t.events || []).filter(function (ev) {
+        return ev.kind === "status" && ev.data && ev.data.status === "queued";
+      }).length - 1; // first queue is the initial creation
+
+      var diagHtml = "";
+      if (diag) {
+        diagHtml = '<div class="diag diag-kind-' + diag.kind + '" role="alert">' +
+          '<div class="diag-kind">' + esc(diag.label) + "</div>" +
+          "<h4>" + esc(diag.title) + "</h4>" +
+          "<p>" + esc(diag.hint) + "</p>" +
+          (failedStep ? '<p>Failed step: <strong>' + esc(failedStep.name) + '</strong> ' +
+            '<span class="mono stat-sub">' + esc(failedStep.tool || "") + "</span></p>" : "") +
+          '<pre>' + esc(t.error) + "</pre>" +
+          '<div class="diag-actions" id="diag-actions"></div></div>';
+      }
+
+      var resultHtml;
+      if (!t.result) {
+        resultHtml = '<div class="result-empty">No result yet. ' +
+          (t.status === "running" || t.status === "queued" || t.status === "awaiting_approval"
+            ? "The task is still working — results appear here when it finishes."
+            : "The task ended without producing a result.") + "</div>";
+      } else {
+        var verified = !!t.result.verified;
+        resultHtml = (verified ? "" :
+          '<p class="stat-sub" style="margin-bottom:8px"><span class="pill queued">unverified</span> ' +
+          "finished, but acceptance criteria were not confirmed</p>") +
+          '<pre class="output">' + esc(JSON.stringify(t.result, null, 2)) + "</pre>";
+      }
+
       view.innerHTML =
         '<div class="page-head"><div><a href="#/tasks">← Tasks</a>' +
-        "<h1 class='mono' style='font-size:20px'>" + esc(taskId) + "</h1>" +
+        "<h1 class='mono' style='font-size:20px;word-break:break-all'>" + esc(taskId) + "</h1>" +
         "<p>" + esc(t.goal) + "</p></div>" +
         '<div class="toolbar" id="task-actions"></div></div>' +
         '<div class="grid cols-4" style="margin-bottom:16px">' +
@@ -407,16 +691,31 @@
         '<div class="card"><h3>Verified</h3><div class="stat">' +
         (t.result && t.result.verified ? '<span class="pill done">yes</span>' : '<span class="pill queued">no</span>') +
         '</div><div class="stat-sub">model claims ≠ verified completion</div></div></div>' +
-        (t.error ? '<div class="error">' + esc(t.error) + "</div>" : "") +
+        diagHtml +
+        (resumes > 0 ? '<p class="stat-sub" style="margin-bottom:14px">Resumed ' + resumes +
+          " time" + (resumes > 1 ? "s" : "") + " from checkpoints.</p>" : "") +
         '<div class="grid cols-2"><div class="card"><h3>Execution timeline</h3><ul class="timeline" id="timeline"></ul></div>' +
-        '<div class="card"><h3>Result &amp; evidence</h3><pre class="output" id="result-pre">' +
-        esc(JSON.stringify(t.result, null, 2) || "no result yet") + "</pre></div></div>";
+        '<div class="card"><h3>Result &amp; evidence</h3><div id="result-pane">' + resultHtml + "</div></div></div>";
       renderActions(t);
       renderTimeline(t);
+      var da = document.getElementById("diag-actions");
+      if (da && (t.status === "failed" || t.status === "cancelled")) {
+        da.innerHTML = '<button class="btn primary small" id="diag-resume">Resume from checkpoint</button>';
+        document.getElementById("diag-resume").addEventListener("click", function () {
+          api("/api/tasks/" + t.id + "/resume", { method: "POST" })
+            .then(function () { toast("Task resumed", "ok"); route(); })
+            .catch(function (e) { toast(e.message, "bad"); });
+        });
+      }
       if (t.status === "running" || t.status === "awaiting_approval" || t.status === "queued") {
         watchTask(taskId, function () { api("/api/tasks/" + taskId).then(function (nt) {
           renderActions(nt); renderTimeline(nt);
-          document.getElementById("result-pre").textContent = JSON.stringify(nt.result, null, 2) || "no result yet";
+          var rp = document.getElementById("result-pane");
+          if (rp) {
+            rp.innerHTML = nt.result
+              ? '<pre class="output">' + esc(JSON.stringify(nt.result, null, 2)) + "</pre>"
+              : '<div class="result-empty">No result yet — the task is still working.</div>';
+          }
           if (nt.status === "completed" || nt.status === "failed" || nt.status === "cancelled") {
             toast("Task " + nt.status, nt.status === "completed" ? "ok" : "bad");
           }
@@ -516,10 +815,10 @@
 
   function auditTable(events) {
     if (!events.length) return '<div class="empty"><p>No audit events yet.</p></div>';
-    return "<table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Task</th></tr></thead><tbody>" +
+    return "<table class='rtable'><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Task</th></tr></thead><tbody>" +
       events.map(function (e) {
-        return "<tr><td class='stat-sub'>" + esc(fmtTime(e.ts)) + "</td><td>" + esc(e.actor) +
-          "</td><td class='mono'>" + esc(e.action) + "</td><td class='mono'>" +
+        return "<tr><td class='stat-sub' data-th='Time'>" + esc(fmtTime(e.ts)) + "</td><td data-th='Actor'>" + esc(e.actor) +
+          "</td><td class='mono' data-th='Action'>" + esc(e.action) + "</td><td class='mono' data-th='Task'>" +
           esc((e.task_id || "").slice(0, 8)) + "</td></tr>";
       }).join("") + "</tbody></table>";
   }
@@ -531,7 +830,7 @@
       var jobs = r[0].jobs, runs = r[1].runs;
       view.innerHTML =
         '<div class="page-head"><div><h1>Scheduler</h1><p>Persistent jobs. State survives restarts; runs never overlap.</p></div></div>' +
-        '<div class="card" style="padding:6px 12px;margin-bottom:16px"><table><thead><tr>' +
+        '<div class="card" style="padding:6px 12px;margin-bottom:16px"><table class="rtable"><thead><tr>' +
         "<th>Job</th><th>Interval</th><th>Status</th><th>Next run</th><th>Last run</th><th>Actions</th></tr></thead><tbody>" +
         (jobs.length ? jobs.map(jobRow).join("") : '<tr><td colspan="6"><div class="empty"><p>No jobs yet. Run <code>nextclaw scheduler ensure</code> in the terminal.</p></div></td></tr>') +
         "</tbody></table></div>" +
@@ -548,12 +847,12 @@
 
   function jobRow(j) {
     var last = j.last_run;
-    return "<tr><td><strong>" + esc(j.name || j.id) + "</strong><div class='stat-sub mono'>" + esc(j.id) + "</div></td>" +
-      "<td>" + esc(fmtInterval(j.interval_s)) + "</td>" +
-      "<td>" + (j.enabled ? '<span class="pill done">enabled</span>' : '<span class="pill queued">disabled</span>') + "</td>" +
-      "<td class='stat-sub'>" + esc(j.enabled ? ago(j.next_run_at) : "—") + "</td>" +
-      "<td>" + (last ? pill(last.status) + " <span class='stat-sub'>" + esc(ago(last.started_at)) + "</span>" : "—") + "</td>" +
-      '<td><div class="toolbar">' +
+    return "<tr><td data-th='Job'><strong>" + esc(j.name || j.id) + "</strong><div class='stat-sub mono'>" + esc(j.id) + "</div></td>" +
+      "<td data-th='Interval'>" + esc(fmtInterval(j.interval_s)) + "</td>" +
+      "<td data-th='Status'>" + (j.enabled ? '<span class="pill done">enabled</span>' : '<span class="pill queued">disabled</span>') + "</td>" +
+      "<td class='stat-sub' data-th='Next run'>" + esc(j.enabled ? ago(j.next_run_at) : "—") + "</td>" +
+      "<td data-th='Last run'>" + (last ? pill(last.status) + " <span class='stat-sub'>" + esc(ago(last.started_at)) + "</span>" : "—") + "</td>" +
+      '<td data-th="Actions"><div class="toolbar">' +
       (j.enabled
         ? '<button class="btn small" id="sj-dis-' + j.id + '">Disable</button>'
         : '<button class="btn small" id="sj-en-' + j.id + '">Enable</button>') +
@@ -569,10 +868,10 @@
 
   function runTable(runs) {
     if (!runs.length) return '<div class="empty"><p>No runs recorded yet.</p></div>';
-    return "<table><thead><tr><th>Run</th><th>Job</th><th>Trigger</th><th>Status</th><th>Started</th></tr></thead><tbody>" +
+    return "<table class='rtable'><thead><tr><th>Run</th><th>Job</th><th>Trigger</th><th>Status</th><th>Started</th></tr></thead><tbody>" +
       runs.map(function (r) {
-        return "<tr><td class='mono'>#" + esc(r.id) + "</td><td class='mono'>" + esc(r.job_id) +
-          "</td><td>" + esc(r.trigger || "") + "</td><td>" + pill(r.status) + "</td><td class='stat-sub'>" +
+        return "<tr><td class='mono' data-th='Run'>#" + esc(r.id) + "</td><td class='mono' data-th='Job'>" + esc(r.job_id) +
+          "</td><td data-th='Trigger'>" + esc(r.trigger || "") + "</td><td data-th='Status'>" + pill(r.status) + "</td><td class='stat-sub' data-th='Started'>" +
           esc(ago(r.started_at)) + "</td></tr>";
       }).join("") + "</tbody></table>";
   }
@@ -958,11 +1257,11 @@
         "</p><div class='toolbar'><button class='btn small danger' id='rotate-token-btn'" +
         (status.token_source === "env" ? " disabled" : "") + ">Rotate API token</button></div></div>" +
         '<div class="card" style="margin-top:16px"><h3>Permission policy — tools</h3>' +
-        "<table><thead><tr><th>Tool</th><th>Risk</th><th>Approval</th><th>Description</th></tr></thead><tbody>" +
+        "<table class='rtable'><thead><tr><th>Tool</th><th>Risk</th><th>Approval</th><th>Description</th></tr></thead><tbody>" +
         policy.tools.map(function (t) {
-          return "<tr><td class='mono'>" + esc(t.name) + "</td><td>" + esc(t.risk) + "</td><td>" +
+          return "<tr><td class='mono' data-th='Tool'>" + esc(t.name) + "</td><td data-th='Risk'>" + esc(t.risk) + "</td><td data-th='Approval'>" +
             (t.requires_approval ? '<span class="pill awaiting_approval">required</span>' : '<span class="pill queued">no</span>') +
-            "</td><td class='stat-sub'>" + esc(t.description) + "</td></tr>";
+            "</td><td class='stat-sub' data-th='Description'>" + esc(t.description) + "</td></tr>";
         }).join("") + "</tbody></table></div>";
       document.getElementById("theme-btn").addEventListener("click", function () {
         document.getElementById("theme-toggle").click();
@@ -1048,12 +1347,12 @@
       var pct = total ? Math.round(100 * done / total) : 0;
       var goal = m.goal || "";
       return "<tr class='rowlink' data-mid='" + esc(m.mission_id) + "' tabindex='0'>" +
-        "<td class='mono'>" + esc(m.mission_id.slice(0, 10)) + "</td>" +
-        "<td>" + esc(goal.length > 70 ? goal.slice(0, 70) + "…" : goal) + "</td>" +
-        "<td>" + pill(m.status) + "</td>" +
-        "<td><div class='progress'><div class='bar' style='width:" + pct + "%'></div></div>" +
+        "<td class='mono' data-th='ID'>" + esc(m.mission_id.slice(0, 10)) + "</td>" +
+        "<td data-th='Goal'>" + esc(goal.length > 70 ? goal.slice(0, 70) + "…" : goal) + "</td>" +
+        "<td data-th='Status'>" + pill(m.status) + "</td>" +
+        "<td data-th='Progress'><div class='progress'><div class='bar' style='width:" + pct + "%'></div></div>" +
         "<span class='stat-sub'>" + done + "/" + total + "</span></td>" +
-        "<td class='stat-sub'>" + esc(ago(m.updated_at)) + "</td></tr>";
+        "<td class='stat-sub' data-th='Updated'>" + esc(ago(m.updated_at)) + "</td></tr>";
     }).join("");
     view.innerHTML =
       '<div class="page-head"><div><h1>Multi-Agent</h1>' +
@@ -1066,7 +1365,7 @@
         '<div class="error">Multi-agent delegation is currently disabled. Enable it in Delegation settings to launch missions.</div>') +
       '<div class="card" style="padding:6px 12px">' +
       (missions.length
-        ? '<table><thead><tr><th>ID</th><th>Goal</th><th>Status</th><th>Progress</th><th>Updated</th></tr></thead><tbody>' +
+        ? '<table class="rtable"><thead><tr><th>ID</th><th>Goal</th><th>Status</th><th>Progress</th><th>Updated</th></tr></thead><tbody>' +
           rows + "</tbody></table>"
         : '<div class="empty"><h3>No missions yet</h3><p>Launch a delegated mission to coordinate multiple worker agents.</p></div>') +
       "</div>";
@@ -1335,7 +1634,7 @@
       (awaiting ? '<div class="error">A worker is waiting on human approval. Review it in <a href="#/approvals">Approvals</a>.</div>' : "") +
       '<div class="card" style="margin-bottom:16px"><h3>Workers &amp; dependencies</h3>' +
       '<div class="stat-sub" style="margin-bottom:10px">Plan order is execution order; a worker starts when its dependencies complete.</div>' +
-      '<table><thead><tr><th>Subtask</th><th>Role</th><th>Status</th><th>Depends on</th><th>Attempts</th><th>Summary</th></tr></thead>' +
+      '<table class="rtable"><thead><tr><th>Subtask</th><th>Role</th><th>Status</th><th>Depends on</th><th>Attempts</th><th>Summary</th></tr></thead>' +
       "<tbody id='deleg-workers'></tbody></table></div>" +
       '<div class="grid cols-2">' +
       '<div class="card"><h3>Artifacts</h3><div id="deleg-artifacts"></div></div>' +
@@ -1368,12 +1667,12 @@
         }).join(" ") || "<span class='stat-sub'>—</span>";
         var sum = w.summary || w.error || "";
         return "<tr class='rowlink' data-wid='" + esc(w.subtask_id) + "' tabindex='0'>" +
-          "<td><strong>" + esc(w.name) + "</strong><br><span class='mono stat-sub'>" + esc(w.subtask_id) + "</span></td>" +
-          "<td class='mono'>" + esc(w.kind === "tool" ? "tool:" + w.tool : w.profile) + "</td>" +
-          "<td>" + pill(w.status) + "</td>" +
-          "<td>" + deps + "</td>" +
-          "<td class='mono'>" + esc(String(w.attempts)) + "</td>" +
-          "<td class='stat-sub'>" + esc(sum.length > 90 ? sum.slice(0, 90) + "…" : sum) + "</td></tr>";
+          "<td data-th='Subtask'><strong>" + esc(w.name) + "</strong><br><span class='mono stat-sub'>" + esc(w.subtask_id) + "</span></td>" +
+          "<td class='mono' data-th='Role'>" + esc(w.kind === "tool" ? "tool:" + w.tool : w.profile) + "</td>" +
+          "<td data-th='Status'>" + pill(w.status) + "</td>" +
+          "<td data-th='Depends on'>" + deps + "</td>" +
+          "<td class='mono' data-th='Attempts'>" + esc(String(w.attempts)) + "</td>" +
+          "<td class='stat-sub' data-th='Summary'>" + esc(sum.length > 90 ? sum.slice(0, 90) + "…" : sum) + "</td></tr>";
       }).join("");
       tb.querySelectorAll("[data-wid]").forEach(function (tr) {
         function open() { workerModal(tr.getAttribute("data-wid")); }
