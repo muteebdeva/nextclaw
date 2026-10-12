@@ -188,5 +188,82 @@ class LLMLoopTests(unittest.TestCase):
         self.assertEqual(part["functionCall"]["name"], "fs.list")
 
 
+class QuotaTests(unittest.TestCase):
+    def setUp(self):
+        self.data = tempfile.mkdtemp(prefix="nc-q-data-")
+        self.cfg = Config(data_dir=self.data,
+                          workspace_root=tempfile.mkdtemp(prefix="nc-q-ws-"))
+        ensure_data_dir(self.cfg)
+
+    def _provider(self):
+        with mock.patch.dict(os.environ, {"NEXTCLAW_GEMINI_API_KEY": "test-key"}):
+            return llm_mod.GeminiProvider(model="gemini-3.7-flash")
+
+    def test_quota_429_not_retried(self):
+        calls = []
+
+        def _fake(url, payload, timeout_s, headers=None):
+            calls.append(1)
+            return 429, {"_http_error": "You exceeded your current quota"}, {}
+
+        with mock.patch("nextclaw.llm._http_post_json", _fake):
+            with self.assertRaises(llm_mod.QuotaExhausted):
+                agent_llm._chat_with_retry(self._provider(), "s", [], [], self.cfg,
+                                           retries=3)
+        self.assertEqual(len(calls), 1)  # no retry loop on quota exhaustion
+
+    def test_transient_429_is_retried(self):
+        calls = []
+
+        def _fake(url, payload, timeout_s, headers=None):
+            calls.append(1)
+            if len(calls) < 3:
+                return 429, {"_http_error": "too many requests, slow down"}, {}
+            return 200, {"candidates": [{"finishReason": "STOP",
+                                         "content": {"parts": [{"text": "hi"}]}}]}, {}
+
+        with mock.patch("nextclaw.llm._http_post_json", _fake):
+            with mock.patch("time.sleep", lambda s: None):
+                resp = agent_llm._chat_with_retry(self._provider(), "s", [], [],
+                                                 self.cfg, retries=3)
+        self.assertEqual(resp.text, "hi")
+        self.assertEqual(len(calls), 3)
+
+    def test_retry_after_header_respected(self):
+        seen = {}
+
+        def _fake(url, payload, timeout_s, headers=None):
+            return 429, {"_http_error": "slow down"}, {"Retry-After": "7"}
+
+        def _sleep(s):
+            seen["slept"] = s
+
+        with mock.patch("nextclaw.llm._http_post_json", _fake):
+            with mock.patch("time.sleep", _sleep):
+                with self.assertRaises(llm_mod.RateLimited):
+                    agent_llm._chat_with_retry(self._provider(), "s", [], [], self.cfg,
+                                               retries=1)
+        self.assertEqual(seen.get("slept"), 7)
+
+    def test_budget_daily_cap_blocks_without_http(self):
+        budget = llm_mod.RequestBudget(self.data)
+        self.cfg.llm_max_requests_per_day = 1
+        budget.record()
+        with self.assertRaises(llm_mod.QuotaExhausted):
+            budget.check(self.cfg)
+
+    def test_budget_cooldown_after_quota_exhausted(self):
+        budget = llm_mod.RequestBudget(self.data)
+        budget.record(quota_exhausted=True)
+        with self.assertRaises(llm_mod.QuotaExhausted) as ctx:
+            budget.check(self.cfg)
+        self.assertIn("cooldown", str(ctx.exception).lower())
+
+    def test_offline_mode_fails_closed(self):
+        with mock.patch.dict(os.environ, {"NEXTCLAW_OFFLINE": "1"}):
+            with self.assertRaises(llm_mod.NotConfigured):
+                llm_mod.llm_provider(self.cfg)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -80,6 +80,45 @@ supported where local models are feasible), `NEXTCLAW_LLM_MODEL`
 (default `gemini-3.7-flash`), `NEXTCLAW_OLLAMA_URL` / `NEXTCLAW_OLLAMA_MODEL`
 for local.
 
+### Quota protection
+
+The Gemini key may be shared (e.g. with a Telegram bot), so the agent
+protects it aggressively:
+
+- 429s mentioning quota/billing raise `QuotaExhausted`: **no retries**.
+  Transient 429/503s are retried with backoff, respecting `Retry-After`.
+- After a quota-exhaustion, a cooldown (default 1h, `llm_quota_cooldown_s`)
+  fails fast **without any HTTP call**.
+- Daily request cap (default 200, `NEXTCLAW_LLM_MAX_PER_DAY`) and per-task
+  cap (default 40 model calls).
+- `NEXTCLAW_OFFLINE=1` disables all model calls (fail closed).
+- Scheduler-driven dev cycles never call the LLM at all.
+- Keys live only in environment variables; they are never printed, logged,
+  or committed.
+
+## Scheduler: autonomous dev cycles every 40 minutes
+
+```bash
+python3 -m nextclaw.cli scheduler ensure   # create the 40-min dev-cycle job
+python3 -m nextclaw.cli scheduler start    # start the persistent daemon
+python3 -m nextclaw.cli scheduler status   # jobs, next runs, last outcomes
+python3 -m nextclaw.cli scheduler run-now  # manual trigger (same safe path)
+python3 -m nextclaw.cli scheduler stop     # stop the daemon
+```
+
+How it behaves:
+
+- Job state, run history, timestamps, and results persist in SQLite
+  (`scheduler.db`); a restart loses nothing.
+- Jobs are claimed atomically — two schedulers can never run the same job
+  twice (duplicate start is refused via pidfile).
+- On startup, stale `running` runs are marked `interrupted` and stuck jobs
+  reset; a missed schedule gets one catch-up run, while outages over an
+  hour just reschedule (no stampede).
+- Each cycle runs in a subprocess with a hard timeout; the cycle itself runs
+  the test suite and records changes, results, and the next task — no LLM
+  calls, so no quota is burned.
+
 Or run the self-contained demo (uses temp dirs, touches nothing real):
 
 ```bash

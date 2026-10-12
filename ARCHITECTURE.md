@@ -44,7 +44,13 @@
 - `llm.py` - real provider abstraction (`GeminiProvider` with function
   calling incl. thoughtSignature round-trip, `OllamaProvider` for local
   models). Keys only from environment; unconfigured providers fail closed.
-  429/503 are retried with bounded backoff.
+  429-with-quota raises `QuotaExhausted` (never retried); transient 429/503
+  retried with backoff honoring `Retry-After`. `RequestBudget` enforces a
+  daily cap and a post-exhaustion cooldown that fails fast without HTTP.
+- `scheduler.py` - persistent 40-minute dev-cycle scheduler: SQLite jobs +
+  runs, atomic claim (no overlaps), stale-run recovery, missed-schedule
+  catch-up with hourly fallback, per-run subprocess timeouts, pidfile
+  daemon with start/stop/status/run-now.
 - `bench.py` - reproducible benchmark suite (runs the real code).
 - `cycle.py` - autonomous dev cycle: runs tests, records state, picks next
   roadmap item.

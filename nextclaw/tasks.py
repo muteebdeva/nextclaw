@@ -223,9 +223,15 @@ class TaskStore:
                 {"role": r["role"], **json.loads(r["content_json"])} for r in rows
             ]
 
-    def count_turns(self, task_id: str) -> int:
+    def count_turns(self, task_id: str, role: Optional[str] = None) -> int:
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM turns WHERE task_id = ?", (task_id,)
-            ).fetchone()
+            if role:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM turns WHERE task_id = ? AND role = ?",
+                    (task_id, role),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM turns WHERE task_id = ?", (task_id,)
+                ).fetchone()
             return int(row[0])

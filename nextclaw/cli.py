@@ -161,6 +161,55 @@ def cmd_cycle(args, cfg: Config) -> int:
     return 0
 
 
+def cmd_scheduler(args, cfg: Config) -> int:
+    from .scheduler import Scheduler, DEV_CYCLE_JOB
+
+    ensure_data_dir(cfg)
+    sch = Scheduler(cfg)
+    action = args.scheduler_action
+
+    if action == "ensure":
+        sch.ensure_defaults()
+        print(f"ensured job '{DEV_CYCLE_JOB}' every 40 minutes")
+        return 0
+    if action == "daemon":
+        sch.daemon_loop()
+        return 0
+    if action == "start":
+        sch.ensure_defaults()
+        pid = sch.start_daemon()
+        print(f"scheduler started (pid {pid})")
+        return 0
+    if action == "stop":
+        stopped = sch.stop_daemon()
+        print("scheduler stopped" if stopped else "scheduler was not running")
+        return 0
+    if action == "status":
+        pid = sch.daemon_alive()
+        print(f"daemon: {'running (pid %d)' % pid if pid else 'not running'}")
+        for job in sch.store.list_jobs():
+            runs = sch.store.list_runs(job["id"], limit=3)
+            last = runs[0] if runs else None
+            print(f"job {job['id']}: enabled={bool(job['enabled'])} status={job['status']} "
+                  f"interval={job['interval_s']}s next_run_in={int(job['next_run_at'] - __import__('time').time())}s "
+                  f"failures={job['consecutive_failures']}")
+            if last:
+                print(f"  last run #{last['id']}: {last['status']} trigger={last['trigger']} "
+                      f"error={last['error'][:120]}")
+        return 0
+    if action == "run-now":
+        sch.ensure_defaults()
+        job_id = args.job or DEV_CYCLE_JOB
+        result = sch.run_job(job_id, "manual")
+        print(json.dumps(result, indent=2, default=str))
+        return 0 if result.get("status") == "completed" else 1
+    if action == "recover":
+        actions = sch.recover()
+        print("\n".join(actions) if actions else "nothing to recover")
+        return 0
+    raise SystemExit(f"unknown scheduler action {action!r}")
+
+
 def cmd_run_agent(args, cfg: Config) -> int:
     from . import agent_llm
 
@@ -230,6 +279,11 @@ def main(argv=None) -> int:
     sub.add_parser("bench")
     sub.add_parser("cycle")
 
+    p = sub.add_parser("scheduler", help="Persistent 40-minute dev-cycle scheduler")
+    p.add_argument("scheduler_action",
+                   choices=["ensure", "start", "stop", "status", "run-now", "recover", "daemon"])
+    p.add_argument("--job", default=None)
+
     args = parser.parse_args(argv)
     overrides = {}
     if args.data_dir:
@@ -251,6 +305,7 @@ def main(argv=None) -> int:
         "forget": lambda: cmd_forget(args, cfg),
         "bench": lambda: cmd_bench(args, cfg),
         "cycle": lambda: cmd_cycle(args, cfg),
+        "scheduler": lambda: cmd_scheduler(args, cfg),
     }
     return handlers[args.cmd]()
 

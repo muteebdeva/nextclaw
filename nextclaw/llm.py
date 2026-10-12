@@ -30,7 +30,19 @@ class NotConfigured(ProviderError):
 
 
 class RateLimited(ProviderError):
-    pass
+    """Transient rate limit: safe to retry with backoff."""
+
+    def __init__(self, msg: str, retry_after_s: float = 0):
+        super().__init__(msg)
+        self.retry_after_s = retry_after_s
+
+
+class QuotaExhausted(ProviderError):
+    """Quota is exhausted: do NOT retry. Back off until cooldown expires."""
+
+    def __init__(self, msg: str, retry_after_s: float = 0):
+        super().__init__(msg)
+        self.retry_after_s = retry_after_s
 
 
 @dataclass
@@ -154,13 +166,28 @@ def _http_post_json(url: str, payload: Dict[str, Any], timeout_s: int, headers=N
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            return resp.status, json.loads(resp.read().decode("utf-8"))
+            return resp.status, json.loads(resp.read().decode("utf-8")), dict(resp.headers)
     except urllib.error.HTTPError as exc:
         try:
-            body = exc.read().decode("utf-8")[:500]
+            body = exc.read().decode("utf-8")[:800]
         except Exception:
             body = ""
-        return exc.code, {"_http_error": body}
+        return exc.code, {"_http_error": body}, dict(exc.headers)
+
+
+def _retry_after_s(headers: Dict[str, Any], cap: float = 120) -> float:
+    for key in ("Retry-After", "retry-after"):
+        if key in headers:
+            try:
+                return max(0.0, min(cap, float(headers[key])))
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+def _looks_like_quota(body_text: str) -> bool:
+    t = body_text.lower()
+    return "quota" in t or "billing" in t or "exceeded your current" in t
 
 
 class GeminiProvider(LLMProvider):
@@ -222,10 +249,25 @@ class GeminiProvider(LLMProvider):
         }
         if declarations:
             payload["tools"] = [{"function_declarations": declarations}]
-        status, body = _http_post_json(url, payload, timeout_s)
+        status, body, headers = _http_post_json(url, payload, timeout_s)
         latency = int((time.time() - started) * 1000)
-        if status in (429, 503):
-            raise RateLimited(f"Gemini retryable (http {status}): {body.get('_http_error', '')[:200]}")
+        err_text = body.get("_http_error", "")
+        if status == 429 and _looks_like_quota(err_text):
+            # Quota exhausted: never retry in a loop. Fail fast instead.
+            raise QuotaExhausted(
+                f"Gemini quota exhausted: {err_text[:200]}",
+                retry_after_s=_retry_after_s(headers),
+            )
+        if status == 429:
+            raise RateLimited(
+                f"Gemini rate limited: {err_text[:200]}",
+                retry_after_s=_retry_after_s(headers),
+            )
+        if status == 503:
+            raise RateLimited(
+                f"Gemini unavailable (503): {err_text[:200]}",
+                retry_after_s=_retry_after_s(headers),
+            )
         if status != 200 or "_http_error" in body:
             raise ProviderError(f"Gemini error (http {status}): {str(body)[:300]}")
         return _parse_gemini_response(body, latency)
@@ -311,7 +353,7 @@ class OllamaProvider(LLMProvider):
                 for d in declarations
             ]
         try:
-            status, body = _http_post_json(f"{self.base_url}/api/chat", payload, timeout_s)
+            status, body, _headers = _http_post_json(f"{self.base_url}/api/chat", payload, timeout_s)
         except _e.URLError as exc:
             raise NotConfigured(f"Ollama not reachable at {self.base_url}: {exc}")
         latency = int((time.time() - started) * 1000)
@@ -329,9 +371,87 @@ class OllamaProvider(LLMProvider):
 
 def llm_provider(cfg) -> LLMProvider:
     """Select the LLM provider from config. Fails closed when unusable."""
+    if os.environ.get("NEXTCLAW_OFFLINE", "") == "1":
+        raise NotConfigured("offline mode (NEXTCLAW_OFFLINE=1): no model calls allowed")
     name = (getattr(cfg, "llm_provider", "gemini") or "gemini").lower()
     if name == "gemini":
         return GeminiProvider(model=getattr(cfg, "llm_model", "gemini-3.7-flash"))
     if name == "ollama":
         return OllamaProvider(model=getattr(cfg, "llm_model", "") or None)
     raise ProviderError(f"unknown llm_provider '{name}'")
+
+
+class RequestBudget:
+    """Daily request cap + quota-exhaustion cooldown, persisted in SQLite.
+
+    Purpose: protect shared API quotas (e.g. the key also serves a Telegram
+    bot). When the provider reports quota exhaustion, we stop calling it
+    entirely until the cooldown expires instead of burning retries.
+    """
+
+    def __init__(self, data_dir: str):
+        import sqlite3 as _sql
+
+        os.makedirs(data_dir, exist_ok=True)
+        self.path = os.path.join(data_dir, "llm_budget.db")
+        conn = _sql.connect(self.path)
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS daily (day TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT NOT NULL)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _day(self) -> str:
+        return time.strftime("%Y-%m-%d")
+
+    def check(self, cfg) -> None:
+        """Raise QuotaExhausted if we must not call the API right now."""
+        import sqlite3 as _sql
+
+        max_day = int(getattr(cfg, "llm_max_requests_per_day", 200))
+        cooldown_s = float(getattr(cfg, "llm_quota_cooldown_s", 3600))
+        conn = _sql.connect(self.path)
+        try:
+            row = conn.execute(
+                "SELECT v FROM state WHERE k='quota_exhausted_at'").fetchone()
+            if row:
+                elapsed = time.time() - float(row[0])
+                if elapsed < cooldown_s:
+                    raise QuotaExhausted(
+                        f"quota cooldown active ({int(cooldown_s - elapsed)}s left);"
+                        " not calling the API")
+                # cooldown expired: clear it and continue
+                conn.execute("DELETE FROM state WHERE k='quota_exhausted_at'")
+                conn.commit()
+            row = conn.execute(
+                "SELECT count FROM daily WHERE day=?", (self._day(),)).fetchone()
+            if row and int(row[0]) >= max_day:
+                raise QuotaExhausted(
+                    f"daily API budget exhausted ({row[0]}/{max_day}); not calling the API")
+        finally:
+            conn.close()
+
+    def record(self, quota_exhausted: bool = False) -> None:
+        import sqlite3 as _sql
+
+        conn = _sql.connect(self.path)
+        try:
+            conn.execute(
+                "INSERT INTO daily (day, count) VALUES (?, 1)"
+                " ON CONFLICT(day) DO UPDATE SET count = count + 1",
+                (self._day(),),
+            )
+            if quota_exhausted:
+                conn.execute(
+                    "INSERT INTO state (k, v) VALUES ('quota_exhausted_at', ?)"
+                    " ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                    (str(time.time()),),
+                )
+            conn.commit()
+        finally:
+            conn.close()

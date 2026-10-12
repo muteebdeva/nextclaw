@@ -1,4 +1,6 @@
 data/*.db
 data/*.json
+data/*.log
+data/*.pid
 __pycache__/
 *.pyc

@@ -47,6 +47,14 @@ class Config:
     llm_timeout_s: int = 60
     max_turns: int = 12
     task_timeout_s: int = 600
+    # Scheduler settings
+    scheduler_tick_s: int = 30
+    scheduler_job_timeout_s: int = 900
+    scheduler_stale_after_s: int = 1800
+    # LLM quota protection
+    llm_max_requests_per_day: int = 200
+    llm_max_requests_per_task: int = 40
+    llm_quota_cooldown_s: int = 3600
 
 
 def load_config(path: str | None = None, overrides: dict | None = None) -> Config:
@@ -85,6 +93,13 @@ def load_config(path: str | None = None, overrides: dict | None = None) -> Confi
         llm_timeout_s=int(os.environ.get("NEXTCLAW_LLM_TIMEOUT_S", data.get("llm_timeout_s", 60))),
         max_turns=int(data.get("max_turns", 12)),
         task_timeout_s=int(data.get("task_timeout_s", 600)),
+        scheduler_tick_s=int(data.get("scheduler_tick_s", 30)),
+        scheduler_job_timeout_s=int(data.get("scheduler_job_timeout_s", 900)),
+        scheduler_stale_after_s=int(data.get("scheduler_stale_after_s", 1800)),
+        llm_max_requests_per_day=int(os.environ.get(
+            "NEXTCLAW_LLM_MAX_PER_DAY", data.get("llm_max_requests_per_day", 200))),
+        llm_max_requests_per_task=int(data.get("llm_max_requests_per_task", 40)),
+        llm_quota_cooldown_s=int(data.get("llm_quota_cooldown_s", 3600)),
     )
 
 

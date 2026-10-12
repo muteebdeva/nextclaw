@@ -104,18 +104,28 @@ def run_llm_task(
 
     if provider is None:
         provider = llm_mod.llm_provider(cfg)
+    budget = llm_mod.RequestBudget(cfg.data_dir)
     declarations = llm_mod.build_declarations(cfg.allowed_tools)
     deadline = time.time() + cfg.task_timeout_s
     turn_index = store.count_turns(task_id)
+    max_task_requests = int(getattr(cfg, "llm_max_requests_per_task", 40))
 
     for _ in range(cfg.max_turns):
         if time.time() > deadline:
             return _finish(task_id, store, cfg, "failed", error="task deadline exceeded")
+        if store.count_turns(task_id, role="assistant") >= max_task_requests:
+            return _finish(task_id, store, cfg, "failed",
+                           error=f"task API budget exceeded ({max_task_requests} model calls)")
 
         turns = store.get_turns(task_id)
         history = _history_for_provider(turns)
         try:
+            budget.check(cfg)  # fail fast: cooldown / daily cap, no wasted call
             resp = _chat_with_retry(provider, SYSTEM_PROMPT, history, declarations, cfg)
+            budget.record()
+        except llm_mod.QuotaExhausted as exc:
+            budget.record(quota_exhausted=True)
+            return _finish(task_id, store, cfg, "failed", error=f"model error: {exc}")
         except llm_mod.ProviderError as exc:
             return _finish(task_id, store, cfg, "failed", error=f"model error: {exc}")
 
@@ -166,11 +176,14 @@ def _chat_with_retry(provider, system, history, declarations, cfg, retries: int 
     for attempt in range(retries + 1):
         try:
             return provider.chat(system, history, declarations, timeout_s=cfg.llm_timeout_s)
-        except llm_mod.RateLimited:
+        except llm_mod.QuotaExhausted:
+            raise  # never retry quota exhaustion; the budget layer handles cooldown
+        except llm_mod.RateLimited as exc:
             if attempt >= retries:
                 raise
-            time.sleep(delay)
-            delay *= 2
+            # Respect the provider's Retry-After when given, bounded.
+            time.sleep(exc.retry_after_s if exc.retry_after_s > 0 else delay)
+            delay = min(delay * 2, 60)
     raise llm_mod.ProviderError("unreachable")
 
 
