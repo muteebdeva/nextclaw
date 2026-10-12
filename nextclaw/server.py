@@ -13,11 +13,13 @@ Secrets (API keys) stay server-side and are never returned by any endpoint.
 """
 from __future__ import annotations
 
+import dataclasses
 import hmac
 import json
 import mimetypes
 import os
 import secrets
+import uuid
 import sys
 import threading
 import time
@@ -89,6 +91,8 @@ class ServerContext:
         self.approvals = ApprovalStore(cfg.data_dir)
         self.gate = ApprovalGate(self.approvals, self.tasks)
         self.provider_store = ProviderStore(cfg.data_dir)
+        from .delegation import DelegationStore
+        self.delegations = DelegationStore(cfg.data_dir)
         # Migrate old llm_provider/llm_model/env settings once, idempotently.
         try:
             seed_from_legacy_config(self.provider_store, cfg)
@@ -206,6 +210,45 @@ class ServerContext:
 
         self.running[task_id] = self.runner.submit(_run)
 
+    def submit_delegation(self, mission_id: str) -> None:
+        """Run a delegation mission in the background; the delegation engine
+        persists status/results to the DelegationStore itself."""
+        from . import delegation as deleg_mod
+
+        if mission_id in self.running and not self.running[mission_id].done():
+            return  # already running; never double-execute
+
+        def _run():
+            try:
+                rec = self.delegations.get(mission_id)
+                if rec is None:
+                    return
+                plan_raw = json.loads(rec["plan"] or "[]")
+                plan = [deleg_mod.Subtask(**{
+                    k: v for k, v in s.items()
+                    if k in deleg_mod.Subtask.__dataclass_fields__})
+                    for s in plan_raw]
+                budgets = deleg_mod.DelegationBudgets(**{
+                    k: v for k, v in json.loads(rec["budgets"] or "{}").items()
+                    if k in deleg_mod.DelegationBudgets.__dataclass_fields__})
+                deleg_mod.run_delegation(
+                    self.cfg, rec["goal"], plan, mission_id=mission_id,
+                    budgets=budgets, store=self.delegations)
+            except Exception as exc:  # never leave a mission stuck
+                try:
+                    rec = self.delegations.get(mission_id)
+                    if rec and rec["status"] not in (
+                            "completed", "failed", "cancelled"):
+                        self.delegations.update(
+                            mission_id, status="failed",
+                            error=f"runner error: {exc}")
+                except Exception:
+                    pass
+            finally:
+                self.running.pop(mission_id, None)
+
+        self.running[mission_id] = self.runner.submit(_run)
+
 
 def _json_body(handler: BaseHTTPRequestHandler, max_bytes: int = 1_000_000) -> Dict[str, Any]:
     length = int(handler.headers.get("Content-Length") or 0)
@@ -300,6 +343,11 @@ class Handler(BaseHTTPRequestHandler):
             ("GET", "/api/quota"): self._api_quota,
             ("GET", "/api/audit"): self._api_audit,
             ("GET", "/api/memory"): self._api_memory,
+            ("GET", "/api/delegations"): self._api_list_delegations,
+            ("POST", "/api/delegations"): self._api_create_delegation,
+            ("GET", "/api/delegations/profiles"): self._api_delegation_profiles,
+            ("GET", "/api/delegations/settings"): self._api_delegation_settings_get,
+            ("PUT", "/api/delegations/settings"): self._api_delegation_settings_put,
             ("POST", "/api/sse/ticket"): self._api_sse_ticket,
             ("POST", "/api/auth/rotate"): self._api_rotate_token,
         }
@@ -481,34 +529,314 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"task_id": task_id, "status": "cancelling"})
         self._error(404, "not found")
 
+    # -- multi-agent delegations ---------------------------------------------
+    # Bounds for dashboard-configurable budgets. Only settings the delegation
+    # engine actually implements are exposed.
+    _BUDGET_BOUNDS = {
+        "max_workers": (1, 32, int),
+        "max_concurrent": (1, 8, int),
+        "max_retries_per_worker": (0, 5, int),
+        "max_model_calls": (1, 500, int),
+        "max_runtime_s": (60, 7200, (int, float)),
+        "max_depth": (1, 3, int),
+    }
+    _DELEGATION_TERMINAL = ("completed", "failed", "cancelled")
+
+    def _delegation_enabled(self) -> bool:
+        return self.ctx.delegations.kv_get(
+            "delegation.enabled", "true") != "false"
+
+    def _api_delegation_profiles(self, qs) -> None:
+        from .delegation import list_profiles
+        self._send_json({"profiles": list_profiles()})
+
+    def _api_delegation_settings_get(self, qs) -> None:
+        self._send_json({"enabled": self._delegation_enabled()})
+
+    def _api_delegation_settings_put(self, qs) -> None:
+        body = _json_body(self)
+        if "enabled" not in body or not isinstance(body["enabled"], bool):
+            raise ApiError(400, "body needs boolean 'enabled'")
+        self.ctx.delegations.kv_set(
+            "delegation.enabled", "true" if body["enabled"] else "false")
+        try:
+            self.ctx.approvals.audit(
+                "dashboard", "delegation.settings",
+                "enabled" if body["enabled"] else "disabled", {})
+        except Exception:
+            pass
+        self._send_json({"enabled": body["enabled"]})
+
+    def _api_list_delegations(self, qs) -> None:
+        rows = self.ctx.delegations.list(limit=50)
+        self._send_json({"delegations": [self._delegation_summary(r)
+                                         for r in rows]})
+
+    def _delegation_summary(self, rec: Dict[str, Any]) -> Dict[str, Any]:
+        results = {}
+        try:
+            results = json.loads(rec.get("results") or "{}")
+        except Exception:
+            pass
+        counts = {"pending": 0, "running": 0, "completed": 0,
+                  "failed": 0, "cancelled": 0}
+        for r in results.values():
+            st = r.get("status", "pending")
+            counts[st] = counts.get(st, 0) + 1
+        return {
+            "mission_id": rec["mission_id"],
+            "goal": rec["goal"],
+            "status": rec["status"],
+            "subtask_counts": counts,
+            "subtasks_total": len(results),
+            "model_calls": rec.get("model_calls") or 0,
+            "workers_launched": rec.get("workers_launched") or 0,
+            "runtime_seconds": rec.get("runtime_seconds") or 0,
+            "error": rec.get("error") or "",
+            "retry_of": rec.get("retry_of") or "",
+            "created_at": rec["created_at"],
+            "updated_at": rec["updated_at"],
+        }
+
+    def _parse_delegation_body(self, body: Dict[str, Any]):
+        from . import delegation as deleg_mod
+        if not self._delegation_enabled():
+            raise ApiError(403, "multi-agent delegation is disabled")
+        goal = str(body.get("goal", "")).strip()
+        if not goal or len(goal) > 5000:
+            raise ApiError(400, "goal is required (1-5000 chars)")
+        raw_subtasks = body.get("subtasks", [])
+        if not isinstance(raw_subtasks, list) or not raw_subtasks:
+            raise ApiError(400, "subtasks must be a non-empty list")
+        if len(raw_subtasks) > 50:
+            raise ApiError(400, "at most 50 subtasks per mission")
+        subtasks = []
+        for i, raw in enumerate(raw_subtasks):
+            if not isinstance(raw, dict):
+                raise ApiError(400, f"subtask {i} must be an object")
+            sid = str(raw.get("id", f"s{i}")).strip()
+            if not sid or len(sid) > 64:
+                raise ApiError(400, f"subtask {i} needs an id (1-64 chars)")
+            kind = str(raw.get("kind", "agent"))
+            if kind not in ("agent", "tool"):
+                raise ApiError(400, f"subtask '{sid}': kind must be agent|tool")
+            profile = str(raw.get("profile", "researcher"))
+            if kind == "agent" and profile not in deleg_mod.WORKER_PROFILES:
+                raise ApiError(
+                    400, f"subtask '{sid}': unknown profile '{profile}'")
+            tool = str(raw.get("tool", ""))
+            if kind == "tool" and not tool:
+                raise ApiError(400, f"subtask '{sid}': tool subtask needs a tool")
+            sgoal = str(raw.get("goal", "")).strip()
+            if kind == "agent" and (not sgoal or len(sgoal) > 5000):
+                raise ApiError(
+                    400, f"subtask '{sid}': agent subtask needs a goal")
+            depends = raw.get("depends_on", [])
+            if not isinstance(depends, list) or any(
+                    not isinstance(d, str) for d in depends):
+                raise ApiError(400, f"subtask '{sid}': depends_on must be a list of ids")
+            criteria = raw.get("acceptance_criteria", [])
+            if not isinstance(criteria, list):
+                raise ApiError(400,
+                               f"subtask '{sid}': acceptance_criteria must be a list")
+            max_retries = raw.get("max_retries", 2)
+            if not isinstance(max_retries, int) or not 0 <= max_retries <= 5:
+                raise ApiError(400,
+                               f"subtask '{sid}': max_retries must be 0-5")
+            timeout_s = raw.get("timeout_s", 600)
+            if not isinstance(timeout_s, (int, float)) or not 30 <= timeout_s <= 3600:
+                raise ApiError(400,
+                               f"subtask '{sid}': timeout_s must be 30-3600")
+            subtasks.append(deleg_mod.Subtask(
+                id=sid, name=str(raw.get("name", sid))[:200], goal=sgoal,
+                kind=kind, profile=profile, tool=tool,
+                args=dict(raw.get("args", {}) or {}),
+                depends_on=list(depends), acceptance_criteria=list(criteria),
+                max_retries=max_retries, timeout_s=int(timeout_s)))
+        # DAG validation: duplicate ids, unknown deps, cycles.
+        try:
+            subtasks = deleg_mod.validate_plan(subtasks)
+        except deleg_mod.DelegationError as exc:
+            raise ApiError(400, f"invalid plan: {exc}")
+        budgets_raw = body.get("budgets", {}) or {}
+        if not isinstance(budgets_raw, dict):
+            raise ApiError(400, "budgets must be an object")
+        budgets = {}
+        for key, (lo, hi, types) in self._BUDGET_BOUNDS.items():
+            if key in budgets_raw:
+                val = budgets_raw[key]
+                if not isinstance(val, types) or isinstance(val, bool) \
+                        or not lo <= val <= hi:
+                    raise ApiError(400, f"budgets.{key} must be {lo}-{hi}")
+                budgets[key] = val
+        return goal, subtasks, budgets
+
+    def _api_create_delegation(self, qs) -> None:
+        from . import delegation as deleg_mod
+        body = _json_body(self)
+        goal, subtasks, budgets = self._parse_delegation_body(body)
+        mission_id = "d_" + uuid.uuid4().hex[:12]
+        plan = [dataclasses.asdict(s) for s in subtasks]
+        self.ctx.delegations.create(mission_id, goal, plan, budgets,
+                                    retry_of=body.get("retry_of") or None)
+        self.ctx.approvals.audit("dashboard", "delegation.create", mission_id,
+                                 {"goal": goal[:200], "subtasks": len(plan)})
+        self.ctx.submit_delegation(mission_id)
+        self._send_json({"mission_id": mission_id, "status": "created"}, 202)
+
     def _route_delegation(self, method: str, path: str, qs) -> None:
-        # GET /api/delegations/<mission_id> — workers, statuses, artifacts.
-        if method != "GET":
-            return self._error(405, "method not allowed")
-        mission_id = path[len("/api/delegations/"):].split("/")[0]
+        # /api/delegations/<id>[/cancel|/retry]
+        rest = path[len("/api/delegations/"):].split("/")
+        mission_id = rest[0]
         if not mission_id:
             return self._error(400, "mission id required")
+        action = rest[1] if len(rest) > 1 else ""
+        if action == "cancel" and method == "POST":
+            return self._api_cancel_delegation(mission_id)
+        if action == "retry" and method == "POST":
+            return self._api_retry_delegation(mission_id)
+        if action == "" and method == "GET":
+            return self._api_delegation_detail(mission_id)
+        return self._error(405, "method not allowed")
+
+    def _api_delegation_detail(self, mission_id: str) -> None:
         from .delegation import list_artifacts
-        # Worker tasks carry mission_id + worker_id + profile in params.
-        workers = []
-        for t in self.ctx.tasks.list_tasks(limit=200):
+        rec = self.ctx.delegations.get(mission_id)
+        if rec is None:
+            return self._error(404, "delegation not found")
+        plan, results, budgets = [], {}, {}
+        try:
+            plan = json.loads(rec.get("plan") or "[]")
+            results = json.loads(rec.get("results") or "{}")
+            budgets = json.loads(rec.get("budgets") or "{}")
+        except Exception:
+            pass
+        # Worker task records (latest per subtask; retries create new rows).
+        tasks_by_sub: Dict[str, Dict[str, Any]] = {}
+        for t in self.ctx.tasks.list_tasks(limit=500):
             params = t.get("params") or {}
-            if params.get("mission_id") == mission_id and params.get("worker_id"):
-                workers.append({
-                    "task_id": t["id"],
-                    "worker_id": params.get("worker_id"),
-                    "profile": params.get("profile"),
-                    "subtask_id": params.get("subtask_id"),
-                    "status": t["status"],
-                    "error": t.get("error") or "",
-                    "updated_at": t["updated_at"],
-                })
-        workers.sort(key=lambda w: w["updated_at"])
-        return self._send_json({
+            if params.get("mission_id") == mission_id and params.get("subtask_id"):
+                sid = params["subtask_id"]
+                prev = tasks_by_sub.get(sid)
+                if prev is None or t.get("updated_at", 0) > prev.get("updated_at", 0):
+                    tasks_by_sub[sid] = t
+        workers = []
+        for s in plan:
+            sid = s.get("id")
+            t = tasks_by_sub.get(sid) or {}
+            r = results.get(sid) or {}
+            status = t.get("status") or r.get("status") or "pending"
+            workers.append({
+                "subtask_id": sid,
+                "name": s.get("name", sid),
+                "goal": s.get("goal", ""),
+                "kind": s.get("kind", "agent"),
+                "profile": s.get("profile", ""),
+                "tool": s.get("tool", ""),
+                "depends_on": s.get("depends_on", []),
+                "acceptance_criteria": s.get("acceptance_criteria", []),
+                "status": status,
+                "attempts": r.get("attempts", 1 if status != "pending" else 0),
+                "task_id": t.get("id", ""),
+                "worker_id": (t.get("params") or {}).get("worker_id", ""),
+                "summary": r.get("summary", ""),
+                "errors": r.get("errors", []),
+                "error": t.get("error") or "",
+                "artifacts": [a.get("name", "") for a in r.get("artifacts", [])],
+                "updated_at": t.get("updated_at") or rec["updated_at"],
+            })
+        self._send_json({
             "mission_id": mission_id,
+            "goal": rec["goal"],
+            "status": rec["status"],
+            "plan": plan,
+            "budgets": budgets,
             "workers": workers,
+            "results": results,
+            "verification": self._safe_json(rec.get("verification")),
+            "usage": {
+                "model_calls": rec.get("model_calls") or 0,
+                "runtime_seconds": rec.get("runtime_seconds") or 0,
+                "workers_launched": rec.get("workers_launched") or 0,
+            },
+            "error": rec.get("error") or "",
+            "retry_of": rec.get("retry_of") or "",
+            "created_at": rec["created_at"],
+            "updated_at": rec["updated_at"],
             "artifacts": list_artifacts(self.ctx.cfg.data_dir, mission_id),
         })
+
+    def _safe_json(self, raw: Any) -> Any:
+        if not raw:
+            return None
+        if isinstance(raw, (dict, list)):
+            return raw
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    def _api_cancel_delegation(self, mission_id: str) -> None:
+        from . import delegation as deleg_mod
+        rec = self.ctx.delegations.get(mission_id)
+        if rec is None:
+            return self._error(404, "delegation not found")
+        if rec["status"] in self._DELEGATION_TERMINAL:
+            return self._error(409, f"mission already {rec['status']}")
+        live = deleg_mod.cancel_delegation_run(mission_id, self.ctx.cfg.data_dir)
+        self.ctx.delegations.update(mission_id, status="cancelled",
+                                    error="cancelled by user")
+        self.ctx.approvals.audit("dashboard", "delegation.cancel", mission_id,
+                                 {"live": live})
+        self._send_json({"mission_id": mission_id, "status": "cancelled",
+                         "live": live})
+
+    def _api_retry_delegation(self, mission_id: str) -> None:
+        from . import delegation as deleg_mod
+        rec = self.ctx.delegations.get(mission_id)
+        if rec is None:
+            return self._error(404, "delegation not found")
+        if rec["status"] not in ("completed", "failed"):
+            return self._error(409, "only finished missions can be retried")
+        if not self._delegation_enabled():
+            return self._error(403, "multi-agent delegation is disabled")
+        try:
+            plan = json.loads(rec.get("plan") or "[]")
+            results = json.loads(rec.get("results") or "{}")
+            budgets = json.loads(rec.get("budgets") or "{}")
+        except Exception:
+            return self._error(500, "stored mission data is corrupt")
+        failed = [sid for sid, r in results.items()
+                  if r.get("status") != "completed"]
+        if not failed:
+            return self._error(409, "no failed subtasks to retry")
+        failed_set = set(failed)
+        retry_plan = []
+        for s in plan:
+            if s.get("id") in failed_set:
+                s = dict(s)
+                # Drop deps on subtasks outside the retry run; their
+                # artifacts remain in the registry for reuse.
+                s["depends_on"] = [d for d in s.get("depends_on", [])
+                                   if d in failed_set]
+                retry_plan.append(s)
+        subtasks = [deleg_mod.Subtask(**{
+            k: v for k, v in s.items()
+            if k in deleg_mod.Subtask.__dataclass_fields__})
+            for s in retry_plan]
+        try:
+            subtasks = deleg_mod.validate_plan(subtasks)
+        except deleg_mod.DelegationError as exc:
+            return self._error(400, f"invalid retry plan: {exc}")
+        new_id = "d_" + uuid.uuid4().hex[:12]
+        self.ctx.delegations.create(
+            new_id, f"Retry of failed subtasks from {mission_id}",
+            [dataclasses.asdict(s) for s in subtasks], budgets, retry_of=mission_id)
+        self.ctx.approvals.audit("dashboard", "delegation.retry", new_id,
+                                 {"from": mission_id, "subtasks": failed})
+        self.ctx.submit_delegation(new_id)
+        self._send_json({"mission_id": new_id, "status": "created",
+                         "retry_of": mission_id, "subtasks": failed}, 202)
 
     def _api_sse_ticket(self, qs) -> None:
         # Issued only after Bearer auth (checked in _handle). Short-lived,

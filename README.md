@@ -50,6 +50,9 @@ python3 -m nextclaw.cli serve
 - **Tasks** — create (deterministic or model-driven), filter, inspect the
   execution timeline, tool calls with arguments/outputs, and verification
   evidence; cancel or resume from checkpoints
+- **Multi-Agent** — launch delegated missions across specialist worker
+  agents, monitor the dependency graph live, inspect worker outputs,
+  cancel or retry failed subtasks, enable/disable delegation
 - **Approvals** — pending high-risk actions with full context; approve or
   reject; every decision lands in the audit log
 - **Scheduler** — jobs, next runs, run history, enable/disable/run-now
@@ -368,8 +371,25 @@ workers via the `delegate` tool (or a mission step):
 - Independent reviewer can request revisions within a bounded round budget.
 - Global budgets: max workers, concurrency, depth, model calls, runtime,
   retries. Cancellation propagates to workers.
-- Dashboard: `GET /api/delegations/<mission_id>` shows workers, statuses,
-  and artifacts. Simple tasks stay on the single-agent path.
+- Dashboard: the **Multi-Agent** section (`#/agents`) configures, launches,
+  monitors and manages missions through the UI — no CLI needed:
+  - **New mission**: mission goal, planning mode (manual subtask editor or
+    automatic planner worker), per-subtask specialist role (researcher,
+    planner, coder, tester, reviewer), dependencies, acceptance criteria,
+    retries, and budgets (max workers, concurrency, model calls, runtime,
+    depth). Workers run with the dashboard's default provider chain.
+  - **Mission list**: live status, subtask progress, resource usage.
+  - **Mission detail**: worker table with roles, statuses, dependencies,
+    attempts, summaries and errors; per-worker inspection (instructions,
+    criteria, evidence, artifacts, link to the worker task); promoted
+    artifacts; verification report; cancel and retry-failed-subtasks
+    controls; "launch plan as mission" for completed planner workers.
+  - **Delegation settings**: enable/disable launching new missions.
+  - Approvals raised by workers appear in the existing **Approvals** queue.
+  - API: `GET/POST /api/delegations`, `GET /api/delegations/<id>`,
+    `POST /api/delegations/<id>/cancel|/retry`,
+    `GET /api/delegations/profiles`, `GET/PUT /api/delegations/settings`.
+- Simple tasks stay on the single-agent path.
 
 ## Contributing
 

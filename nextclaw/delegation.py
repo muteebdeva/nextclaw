@@ -298,7 +298,8 @@ def validate_plan(subtasks: List[Subtask]) -> List[Subtask]:
 
 def _artifacts_init(data_dir: str) -> None:
     os.makedirs(data_dir, exist_ok=True)
-    conn = sqlite3.connect(os.path.join(data_dir, "tasks.db"))
+    conn = sqlite3.connect(os.path.join(data_dir, "tasks.db"), timeout=30.0)
+    conn.execute("PRAGMA busy_timeout=30000")
     try:
         conn.execute(
             """
@@ -338,7 +339,8 @@ def register_artifact(data_dir: str, mission_id: str, worker_id: str,
     if not os.path.isfile(path):
         raise DelegationError(f"artifact '{name}': file not found: {path}")
     digest = _sha256_file(path)
-    conn = sqlite3.connect(os.path.join(data_dir, "tasks.db"))
+    conn = sqlite3.connect(os.path.join(data_dir, "tasks.db"), timeout=30.0)
+    conn.execute("PRAGMA busy_timeout=30000")
     try:
         row = conn.execute(
             "SELECT COALESCE(MAX(version), 0) FROM delegation_artifacts"
@@ -360,7 +362,8 @@ def register_artifact(data_dir: str, mission_id: str, worker_id: str,
 
 
 def list_artifacts(data_dir: str, mission_id: str) -> List[Dict[str, Any]]:
-    conn = sqlite3.connect(os.path.join(data_dir, "tasks.db"))
+    conn = sqlite3.connect(os.path.join(data_dir, "tasks.db"), timeout=30.0)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
@@ -618,6 +621,7 @@ def run_delegation(
     provider=None,
     depth: int = 1,
     on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    store: Optional[DelegationStore] = None,
 ) -> Dict[str, Any]:
     """Execute a delegation DAG. Returns a structured delegation report.
 
@@ -626,9 +630,10 @@ def run_delegation(
     - Failures: retryable errors are retried (bounded); a failed subtask
       fails its dependents without running them. No blind full restarts.
     - Cancellation propagates to running workers.
+    - If `store` is given, mission status/results persist to the delegation
+      store so the dashboard can monitor the run; the live context is also
+      registered for cancellation via cancel_delegation_run().
     """
-    from .tasks import TaskStore
-
     budgets = budgets or DelegationBudgets()
     subtasks = validate_plan(subtasks)
     if len(subtasks) > budgets.max_workers:
@@ -641,7 +646,16 @@ def run_delegation(
     _artifacts_init(cfg.data_dir)
     mission_id = mission_id or "d_" + uuid.uuid4().hex[:12]
     ctx = DelegationContext(budgets)
-    store = TaskStore(cfg.data_dir)
+    with _LIVE_LOCK:
+        _LIVE_CTX[mission_id] = ctx
+    if store:
+        if store.get(mission_id) is None:
+            store.create(
+                mission_id, goal,
+                [dataclasses.asdict(s) for s in subtasks],
+                dataclasses.asdict(budgets))
+        else:
+            store.update(mission_id, status="running")
 
     def emit(kind: str, data: Dict[str, Any]) -> None:
         if on_event:
@@ -830,33 +844,57 @@ def run_delegation(
                 for sid, fut in running.items():
                     fut.cancel()
 
-    # Cancel any worker tasks still marked running in the DB.
-    for sid, wid in worker_ids.items():
-        pass  # best-effort; tasks check cancel_requested themselves
-    report = {
-        "mission_id": mission_id,
-        "goal": goal,
-        "status": "completed" if all(
-            r.status == "completed" for r in ctx.results.values()) else "failed",
-        "results": {sid: r.as_dict() for sid, r in ctx.results.items()},
-        "artifacts": all_artifacts,
-        "usage": {
-            "workers_launched": ctx.workers_launched,
-            "model_calls": ctx.model_calls,
-            "duration_s": round(time.time() - ctx.started_at, 2),
-        },
-    }
-    if run_error:
-        report["status"] = "failed"
-        report["error"] = run_error
-    # Honest partial results: list what didn't complete.
-    failed = [sid for sid, r in ctx.results.items() if r.status != "completed"]
-    if failed:
-        report["failed_subtasks"] = failed
-        report["error"] = f"{len(failed)} subtask(s) failed: {failed}"
-    emit("delegation_finished", {"mission_id": mission_id,
-                                 "status": report["status"]})
-    return report
+    try:
+        # Cancel any worker tasks still marked running in the DB.
+        for sid, wid in worker_ids.items():
+            pass  # best-effort; tasks check cancel_requested themselves
+        cancelled = ctx.cancel_event.is_set()
+        results_out = {}
+        for sid, r in ctx.results.items():
+            d = r.as_dict()
+            d["attempts"] = attempts.get(sid, 1)
+            results_out[sid] = d
+        report = {
+            "mission_id": mission_id,
+            "goal": goal,
+            "status": "completed" if all(
+                r.status == "completed" for r in ctx.results.values()) else "failed",
+            "results": results_out,
+            "artifacts": all_artifacts,
+            "usage": {
+                "workers_launched": ctx.workers_launched,
+                "model_calls": ctx.model_calls,
+                "duration_s": round(time.time() - ctx.started_at, 2),
+            },
+        }
+        if run_error:
+            report["status"] = "failed"
+            report["error"] = run_error
+        if cancelled and report["status"] != "failed":
+            report["status"] = "cancelled"
+        # Honest partial results: list what didn't complete.
+        failed = [sid for sid, r in ctx.results.items() if r.status != "completed"]
+        if failed:
+            report["failed_subtasks"] = failed
+            if "error" not in report:
+                report["error"] = f"{len(failed)} subtask(s) failed: {failed}"
+        emit("delegation_finished", {"mission_id": mission_id,
+                                     "status": report["status"]})
+        if store:
+            try:
+                store.update(
+                    mission_id, status=report["status"],
+                    results=results_out,
+                    model_calls=ctx.model_calls,
+                    runtime_seconds=round(time.time() - ctx.started_at, 2),
+                    workers_launched=ctx.workers_launched,
+                    error=report.get("error", ""))
+            except Exception:
+                pass  # persistence must never break the report
+        return report
+    finally:
+        with _LIVE_LOCK:
+            _LIVE_CTX.pop(mission_id, None)
 
 
 def cancel_delegation(ctx: DelegationContext, cfg) -> None:
@@ -873,6 +911,154 @@ def cancel_delegation(ctx: DelegationContext, cfg) -> None:
                 store.request_cancel(t["id"])
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Persistence: delegation missions (dashboard-visible state)
+# ---------------------------------------------------------------------------
+
+_DELEGATIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS delegations (
+    mission_id TEXT PRIMARY KEY,
+    goal TEXT NOT NULL,
+    plan TEXT NOT NULL,
+    budgets TEXT NOT NULL,
+    model TEXT,
+    status TEXT NOT NULL DEFAULT 'created',
+    results TEXT,
+    verification TEXT,
+    model_calls INTEGER NOT NULL DEFAULT 0,
+    runtime_seconds REAL NOT NULL DEFAULT 0,
+    workers_launched INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    retry_of TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS delegation_kv (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
+
+class DelegationStore:
+    """SQLite persistence for delegation missions (same data_dir as TaskStore)."""
+
+    def __init__(self, data_dir: str):
+        os.makedirs(data_dir, exist_ok=True)
+        self.path = os.path.join(data_dir, "tasks.db")
+        self._init()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=30.0)
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init(self) -> None:
+        with self._connect() as conn:
+            conn.executescript(_DELEGATIONS_SCHEMA)
+
+    def create(self, mission_id: str, goal: str, plan: List[Dict[str, Any]],
+               budgets: Dict[str, Any], model: Optional[str] = None,
+               retry_of: Optional[str] = None) -> None:
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO delegations (mission_id, goal, plan, budgets, model,"
+                " status, retry_of, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?)",
+                (mission_id, goal, json.dumps(plan), json.dumps(budgets),
+                 model, retry_of, now, now))
+
+    def update(self, mission_id: str, **fields: Any) -> None:
+        allowed = {"status", "results", "verification", "model_calls",
+                   "runtime_seconds", "workers_launched", "error"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return
+        sets["updated_at"] = time.time()
+        conv = {k: (json.dumps(v) if k in ("results", "verification")
+                    and not isinstance(v, str) else v)
+                for k, v in sets.items()}
+        clause = ", ".join(f"{k} = ?" for k in conv)
+        with self._connect() as conn:
+            conn.execute(f"UPDATE delegations SET {clause} WHERE mission_id = ?",
+                         (*conv.values(), mission_id))
+
+    def get(self, mission_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM delegations WHERE mission_id = ?",
+                (mission_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM delegations ORDER BY created_at DESC LIMIT ?",
+                (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def kv_get(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM delegation_kv WHERE key = ?",
+                (key,)).fetchone()
+        return row["value"] if row else default
+
+    def kv_set(self, key: str, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO delegation_kv (key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value))
+
+
+# ---------------------------------------------------------------------------
+# Live-run registry: lets the dashboard cancel a delegation running in a
+# background thread, without reaching into run_delegation's internals.
+# ---------------------------------------------------------------------------
+
+_LIVE_LOCK = threading.Lock()
+_LIVE_CTX: Dict[str, DelegationContext] = {}
+
+
+def cancel_delegation_run(mission_id: str, data_dir: str) -> bool:
+    """Request cancellation of a live delegation run. Returns True if a live
+    run was found and cancelled; False if no live run exists."""
+    from .tasks import TaskStore
+    with _LIVE_LOCK:
+        ctx = _LIVE_CTX.get(mission_id)
+    if ctx is None:
+        return False
+    ctx.cancel()
+    store = TaskStore(data_dir)
+    try:
+        for t in store.list_tasks(limit=200):
+            params = t.get("params") or {}
+            if (params.get("mission_id") == mission_id
+                    and t.get("status") == "running"):
+                store.request_cancel(t["id"])
+    except Exception:
+        pass
+    return True
+
+
+def list_profiles() -> List[Dict[str, Any]]:
+    """Worker profiles as JSON-safe dicts (for the dashboard role picker)."""
+    out = []
+    for name, p in WORKER_PROFILES.items():
+        out.append({
+            "name": name,
+            "description": p.description,
+            "role_summary": (p.role.split("\n")[0] if p.role else "")[:160],
+            "allowed_tools": list(p.allowed_tools),
+            "max_turns": p.max_turns,
+            "isolated_workspace": p.isolated_workspace,
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------

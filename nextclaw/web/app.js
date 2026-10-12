@@ -164,11 +164,15 @@
       a.classList.toggle("active", hash.indexOf("#/" + a.getAttribute("data-nav")) === 0);
     });
     stopSse();
+    stopDelegPoll();
     var m = hash.match(/^#\/tasks\/([a-z0-9]+)$/);
     if (m) return renderTaskDetail(m[1]);
+    var m2 = hash.match(/^#\/agents\/([a-z0-9_]+)$/);
+    if (m2) return renderDelegationDetail(m2[1]);
     var pages = {
       "#/overview": renderOverview,
       "#/tasks": renderTasks,
+      "#/agents": renderDelegations,
       "#/approvals": renderApprovals,
       "#/scheduler": renderScheduler,
       "#/providers": renderProviders,
@@ -1005,6 +1009,495 @@
       try { document.execCommand("copy"); toast("Copied", "ok"); }
       catch (e) { toast("Copy manually", "bad"); }
     });
+  }
+
+  /* ---------- multi-agent delegations ---------- */
+  var delegProfiles = null;
+  var delegPollTimer = null;
+  var delegDetailCache = null;
+
+  function stopDelegPoll() {
+    if (delegPollTimer) { clearInterval(delegPollTimer); delegPollTimer = null; }
+  }
+
+  function delegProfilesCached() {
+    if (delegProfiles) return Promise.resolve(delegProfiles);
+    return api("/api/delegations/profiles").then(function (d) {
+      delegProfiles = d.profiles;
+      return delegProfiles;
+    });
+  }
+
+  function delegActive(status) {
+    return status === "created" || status === "running" || status === "verifying";
+  }
+
+  /* ----- mission list ----- */
+  function renderDelegations() {
+    stopDelegPoll();
+    loading(view);
+    Promise.all([api("/api/delegations"), api("/api/delegations/settings")])
+      .then(function (res) { renderDelegationList(res[0].delegations, res[1].enabled); })
+      .catch(function (e) { showError(view, e); });
+  }
+
+  function renderDelegationList(missions, enabled) {
+    var rows = missions.map(function (m) {
+      var total = m.subtasks_total || 0;
+      var done = (m.subtask_counts && m.subtask_counts.completed) || 0;
+      var pct = total ? Math.round(100 * done / total) : 0;
+      var goal = m.goal || "";
+      return "<tr class='rowlink' data-mid='" + esc(m.mission_id) + "' tabindex='0'>" +
+        "<td class='mono'>" + esc(m.mission_id.slice(0, 10)) + "</td>" +
+        "<td>" + esc(goal.length > 70 ? goal.slice(0, 70) + "…" : goal) + "</td>" +
+        "<td>" + pill(m.status) + "</td>" +
+        "<td><div class='progress'><div class='bar' style='width:" + pct + "%'></div></div>" +
+        "<span class='stat-sub'>" + done + "/" + total + "</span></td>" +
+        "<td class='stat-sub'>" + esc(ago(m.updated_at)) + "</td></tr>";
+    }).join("");
+    view.innerHTML =
+      '<div class="page-head"><div><h1>Multi-Agent</h1>' +
+      "<p>Delegated missions: a lead plan executed by specialist worker agents.</p></div>" +
+      '<div class="toolbar">' +
+      '<button class="btn" id="deleg-settings-btn">Delegation settings</button>' +
+      '<button class="btn primary" id="new-mission-btn"' + (enabled ? "" : " disabled") + ">New mission</button>" +
+      "</div></div>" +
+      (enabled ? "" :
+        '<div class="error">Multi-agent delegation is currently disabled. Enable it in Delegation settings to launch missions.</div>') +
+      '<div class="card" style="padding:6px 12px">' +
+      (missions.length
+        ? '<table><thead><tr><th>ID</th><th>Goal</th><th>Status</th><th>Progress</th><th>Updated</th></tr></thead><tbody>' +
+          rows + "</tbody></table>"
+        : '<div class="empty"><h3>No missions yet</h3><p>Launch a delegated mission to coordinate multiple worker agents.</p></div>') +
+      "</div>";
+    view.querySelectorAll("[data-mid]").forEach(function (tr) {
+      function go() { location.hash = "#/agents/" + tr.getAttribute("data-mid"); }
+      tr.addEventListener("click", go);
+      tr.addEventListener("keydown", function (e) { if (e.key === "Enter") go(); });
+    });
+    document.getElementById("deleg-settings-btn").addEventListener("click", delegSettingsModal);
+    var nb = document.getElementById("new-mission-btn");
+    if (nb && enabled) nb.addEventListener("click", function () { newMissionModal(null); });
+  }
+
+  function delegSettingsModal() {
+    api("/api/delegations/settings").then(function (s) {
+      modal(
+        "<h2>Delegation settings</h2>" +
+        '<p class="stat-sub">Controls whether new multi-agent missions can be launched. ' +
+        "In-flight missions are unaffected by disabling.</p>" +
+        '<label class="check"><input type="checkbox" id="ds-enabled"' +
+        (s.enabled ? " checked" : "") + "> <span>Enable multi-agent delegation</span></label>" +
+        '<div id="ds-error" class="error hidden"></div>' +
+        '<div class="actions"><button class="btn ghost" id="ds-cancel">Cancel</button>' +
+        '<button class="btn primary" id="ds-save">Save</button></div>'
+      );
+      document.getElementById("ds-cancel").addEventListener("click", closeModal);
+      document.getElementById("ds-save").addEventListener("click", function () {
+        var on = document.getElementById("ds-enabled").checked;
+        api("/api/delegations/settings", { method: "PUT", body: { enabled: on } })
+          .then(function () { closeModal(); toast("Delegation " + (on ? "enabled" : "disabled"), "ok"); renderDelegations(); })
+          .catch(function (e) {
+            var el = document.getElementById("ds-error");
+            el.textContent = e.message; el.classList.remove("hidden");
+          });
+      });
+    }).catch(function (e) { toast(e.message, "bad"); });
+  }
+
+  /* ----- new mission ----- */
+  function newMissionModal(prefill) {
+    prefill = prefill || {};
+    delegProfilesCached().then(function (profiles) {
+      var profileOpts = profiles.map(function (p) {
+        return '<option value="' + esc(p.name) + '"' + (p.name === "researcher" ? " selected" : "") + ">" +
+          esc(p.name) + " — " + esc(p.description.slice(0, 60)) + "</option>";
+      }).join("");
+      modal(
+        "<h2>New delegated mission</h2>" +
+        '<p class="stat-sub">The mission itself is the lead: it plans, delegates to specialist workers, ' +
+        "and verifies the result. Workers run with the dashboard's default provider chain.</p>" +
+        '<label class="field"><span>Mission goal</span>' +
+        '<textarea id="nm-goal" rows="3" placeholder="What should the worker team accomplish?">' +
+        esc(prefill.goal || "") + "</textarea></label>" +
+        '<label class="field"><span>Planning mode</span><select id="nm-mode">' +
+        '<option value="manual">Manual — I define the subtasks and their dependencies</option>' +
+        '<option value="auto"' + (prefill.auto ? " selected" : "") + ">Automatic — a planner worker decomposes the goal first</option>" +
+        "</select></label>" +
+        '<div id="nm-auto-hint" class="hidden"><label class="field"><span>Context for the planner (optional)</span>' +
+        '<textarea id="nm-hint" rows="2" placeholder="Constraints, scope, things to avoid…">' +
+        esc(prefill.hint || "") + "</textarea></label>" +
+        '<p class="stat-sub">A <span class="mono">planner</span> worker produces a subtask plan. ' +
+        "After it completes, open the mission and choose “Launch plan as mission”.</p></div>" +
+        '<div id="nm-manual"><h3 style="margin:4px 0 10px">Subtasks</h3><div id="nm-subs"></div>' +
+        '<button class="btn small" id="nm-add-sub">+ Add subtask</button></div>' +
+        "<h3 style='margin:18px 0 10px'>Budgets &amp; limits</h3>" +
+        '<div class="grid cols-3">' +
+        budgetField("nm-b-workers", "Max workers", 8, 1, 32) +
+        budgetField("nm-b-conc", "Max concurrent", 2, 1, 8) +
+        budgetField("nm-b-retries", "Retries / worker", 2, 0, 5) +
+        budgetField("nm-b-calls", "Max model calls", 120, 1, 500) +
+        budgetField("nm-b-runtime", "Max runtime (s)", 1800, 60, 7200) +
+        budgetField("nm-b-depth", "Max depth", 2, 1, 3) +
+        "</div>" +
+        '<div id="nm-error" class="error hidden"></div>' +
+        '<div class="actions"><button class="btn ghost" id="nm-cancel">Cancel</button>' +
+        '<button class="btn primary" id="nm-create">Create &amp; launch</button></div>'
+      );
+      window.__nmProfiles = profileOpts;
+      var subWrap = document.getElementById("nm-subs");
+      function addSub(data) {
+        var div = document.createElement("div");
+        div.className = "subtask";
+        div.innerHTML = subtaskEditor(window.__nmProfiles, data || {});
+        subWrap.appendChild(div);
+        bindSubtask(div);
+        if (data) {
+          if (data.profile) div.querySelector(".s-profile").value = data.profile;
+          if (data.kind) {
+            div.querySelector(".s-kind").value = data.kind;
+            var isTool = data.kind === "tool";
+            div.querySelector(".s-agent").classList.toggle("hidden", isTool);
+            div.querySelector(".s-tool").classList.toggle("hidden", !isTool);
+          }
+        }
+      }
+      document.getElementById("nm-add-sub").addEventListener("click", function () { addSub(null); });
+      (prefill.subtasks && prefill.subtasks.length ? prefill.subtasks : [null]).forEach(addSub);
+      var modeSel = document.getElementById("nm-mode");
+      function syncMode() {
+        var auto = modeSel.value === "auto";
+        document.getElementById("nm-manual").classList.toggle("hidden", auto);
+        document.getElementById("nm-auto-hint").classList.toggle("hidden", !auto);
+      }
+      modeSel.addEventListener("change", syncMode);
+      syncMode();
+      document.getElementById("nm-cancel").addEventListener("click", closeModal);
+      document.getElementById("nm-create").addEventListener("click", function () {
+        var errEl = document.getElementById("nm-error");
+        function fail(msg) { errEl.textContent = msg; errEl.classList.remove("hidden"); }
+        var goal = document.getElementById("nm-goal").value.trim();
+        if (!goal) return fail("Describe the mission goal first.");
+        var auto = modeSel.value === "auto";
+        var subtasks;
+        if (auto) {
+          var hint = document.getElementById("nm-hint").value.trim();
+          subtasks = [{
+            id: "plan", name: "Decompose goal into subtasks",
+            kind: "agent", profile: "planner",
+            goal: goal + (hint ? "\n\nContext: " + hint : "") +
+              "\n\nReturn ONLY the JSON plan object specified in your instructions.",
+            depends_on: [], acceptance_criteria: [], max_retries: 1, timeout_s: 600,
+          }];
+        } else {
+          subtasks = [];
+          var divs = subWrap.querySelectorAll(".subtask");
+          if (!divs.length) return fail("Add at least one subtask.");
+          for (var i = 0; i < divs.length; i++) {
+            var st = readSubtask(divs[i], i, fail);
+            if (!st) return;
+            subtasks.push(st);
+          }
+        }
+        var budgets = {};
+        [["nm-b-workers", "max_workers"], ["nm-b-conc", "max_concurrent"],
+         ["nm-b-retries", "max_retries_per_worker"], ["nm-b-calls", "max_model_calls"],
+         ["nm-b-runtime", "max_runtime_s"], ["nm-b-depth", "max_depth"]].forEach(function (pair) {
+          var v = parseInt(document.getElementById(pair[0]).value, 10);
+          if (!isNaN(v)) budgets[pair[1]] = v;
+        });
+        api("/api/delegations", { method: "POST", body: { goal: goal, subtasks: subtasks, budgets: budgets } })
+          .then(function (d) {
+            closeModal();
+            toast("Mission launched: " + d.mission_id.slice(0, 10), "ok");
+            location.hash = "#/agents/" + d.mission_id;
+          })
+          .catch(function (e) { fail(e.message); });
+      });
+    }).catch(function (e) { toast(e.message, "bad"); });
+  }
+
+  function budgetField(id, label, val, min, max) {
+    return '<label class="field"><span>' + esc(label) + "</span>" +
+      '<input id="' + id + '" type="number" min="' + min + '" max="' + max + '" value="' + val + '"></label>';
+  }
+
+  function subtaskEditor(profileOpts, data) {
+    data = data || {};
+    var kind = data.kind || "agent";
+    return '<div class="sub-head"><strong>Subtask</strong>' +
+      '<button class="btn ghost small sub-remove" type="button">Remove</button></div>' +
+      '<div class="grid cols-3">' +
+      '<label class="field"><span>ID</span><input class="s-id" type="text" value="' + esc(data.id || "") + '" placeholder="e.g. research"></label>' +
+      '<label class="field"><span>Name</span><input class="s-name" type="text" value="' + esc(data.name || "") + '" placeholder="Short label"></label>' +
+      '<label class="field"><span>Kind</span><select class="s-kind">' +
+      '<option value="agent"' + (kind === "agent" ? " selected" : "") + ">agent — LLM worker</option>" +
+      '<option value="tool"' + (kind === "tool" ? " selected" : "") + ">tool — single tool call</option>" +
+      "</select></label></div>" +
+      '<div class="s-agent' + (kind === "tool" ? " hidden" : "") + '">' +
+      '<div class="grid cols-2">' +
+      '<label class="field"><span>Specialist role</span><select class="s-profile">' + profileOpts + "</select></label>" +
+      '<label class="field"><span>Depends on (comma-separated IDs)</span><input class="s-deps" type="text" value="' +
+      esc((data.depends_on || []).join(", ")) + '" placeholder="research"></label></div>' +
+      '<label class="field"><span>Goal / instructions</span>' +
+      '<textarea class="s-goal" rows="2" placeholder="Exactly what this worker should do">' + esc(data.goal || "") + "</textarea></label></div>" +
+      '<div class="s-tool' + (kind === "agent" ? " hidden" : "") + '">' +
+      '<div class="grid cols-2">' +
+      '<label class="field"><span>Tool name</span><input class="s-toolname" type="text" value="' + esc(data.tool || "") + '" placeholder="fs.list"></label>' +
+      '<label class="field"><span>Depends on (comma-separated IDs)</span><input class="s-deps2" type="text" value="' +
+      esc((data.depends_on || []).join(", ")) + '" placeholder="research"></label></div>' +
+      '<label class="field"><span>Tool args (JSON)</span>' +
+      '<textarea class="s-args mono" rows="2" placeholder=\'{"path": "."}\'>' + esc(data.argsJson || "") + "</textarea></label></div>" +
+      '<div class="grid cols-2">' +
+      '<label class="field"><span>Acceptance criteria (one per line)</span>' +
+      '<textarea class="s-criteria" rows="2" placeholder="tests pass">' + esc((data.acceptance_criteria || []).join("\n")) + "</textarea></label>" +
+      '<label class="field"><span>Max retries</span><input class="s-retries" type="number" min="0" max="5" value="' +
+      (data.max_retries != null ? data.max_retries : 2) + '"></label></div>';
+  }
+
+  function bindSubtask(div) {
+    div.querySelector(".sub-remove").addEventListener("click", function () { div.remove(); });
+    var kindSel = div.querySelector(".s-kind");
+    kindSel.addEventListener("change", function () {
+      var isTool = kindSel.value === "tool";
+      div.querySelector(".s-agent").classList.toggle("hidden", isTool);
+      div.querySelector(".s-tool").classList.toggle("hidden", !isTool);
+    });
+  }
+
+  function readSubtask(div, i, fail) {
+    function val(sel) { return div.querySelector(sel).value.trim(); }
+    var kind = div.querySelector(".s-kind").value;
+    var id = val(".s-id") || ("s" + i);
+    var st = {
+      id: id,
+      name: val(".s-name") || id,
+      kind: kind,
+      depends_on: val(kind === "tool" ? ".s-deps2" : ".s-deps").split(",").map(function (s) { return s.trim(); }).filter(Boolean),
+      acceptance_criteria: val(".s-criteria").split("\n").map(function (s) { return s.trim(); }).filter(Boolean),
+      max_retries: parseInt(val(".s-retries"), 10) || 0,
+    };
+    if (kind === "agent") {
+      st.profile = div.querySelector(".s-profile").value;
+      st.goal = val(".s-goal");
+      if (!st.goal) { fail("Subtask '" + id + "' needs a goal."); return null; }
+    } else {
+      st.tool = val(".s-toolname");
+      if (!st.tool) { fail("Subtask '" + id + "' needs a tool name."); return null; }
+      var raw = val(".s-args");
+      if (raw) {
+        try { st.args = JSON.parse(raw); }
+        catch (e) { fail("Subtask '" + id + "': tool args are not valid JSON."); return null; }
+      }
+      st.goal = "";
+    }
+    return st;
+  }
+
+  /* ----- mission detail ----- */
+  function renderDelegationDetail(missionId) {
+    stopDelegPoll();
+    loading(view);
+    api("/api/delegations/" + encodeURIComponent(missionId)).then(function (d) {
+      delegDetailCache = d;
+      renderDelegationBody(d);
+      if (delegActive(d.status)) {
+        delegPollTimer = setInterval(function () {
+          api("/api/delegations/" + encodeURIComponent(missionId)).then(function (nd) {
+            delegDetailCache = nd;
+            updateDelegationLive(nd);
+            if (!delegActive(nd.status)) stopDelegPoll();
+          }).catch(function () {});
+        }, 4000);
+      }
+    }).catch(function (e) { showError(view, e); });
+  }
+
+  function delegProgress(d) {
+    var total = d.workers.length;
+    var done = d.workers.filter(function (w) { return w.status === "completed"; }).length;
+    return { total: total, done: done, pct: total ? Math.round(100 * done / total) : 0 };
+  }
+
+  function renderDelegationBody(d) {
+    var p = delegProgress(d);
+    var failedSubs = d.workers.filter(function (w) { return w.status === "failed" || w.status === "cancelled"; });
+    var awaiting = d.workers.some(function (w) { return w.status === "awaiting_approval"; });
+    var elapsed = Math.max(0, (d.status && delegActive(d.status) ? Date.now() / 1000 : d.updated_at) - d.created_at);
+    view.innerHTML =
+      '<div class="page-head"><div><a href="#/agents">← Multi-Agent</a>' +
+      "<h1 class='mono' style='font-size:20px'>" + esc(d.mission_id) + "</h1>" +
+      "<p>" + esc(d.goal) + "</p></div>" +
+      '<div class="toolbar" id="deleg-actions"></div></div>' +
+      (d.retry_of ? '<p class="stat-sub">Retry of <a href="#/agents/' + esc(d.retry_of) + '">' + esc(d.retry_of) + "</a></p>" : "") +
+      '<div class="grid cols-4" style="margin-bottom:16px" id="deleg-stats">' + delegStatsHtml(d, p, elapsed) + "</div>" +
+      (d.error ? '<div class="error">' + esc(d.error) + "</div>" : "") +
+      (awaiting ? '<div class="error">A worker is waiting on human approval. Review it in <a href="#/approvals">Approvals</a>.</div>' : "") +
+      '<div class="card" style="margin-bottom:16px"><h3>Workers &amp; dependencies</h3>' +
+      '<div class="stat-sub" style="margin-bottom:10px">Plan order is execution order; a worker starts when its dependencies complete.</div>' +
+      '<table><thead><tr><th>Subtask</th><th>Role</th><th>Status</th><th>Depends on</th><th>Attempts</th><th>Summary</th></tr></thead>' +
+      "<tbody id='deleg-workers'></tbody></table></div>" +
+      '<div class="grid cols-2">' +
+      '<div class="card"><h3>Artifacts</h3><div id="deleg-artifacts"></div></div>' +
+      '<div class="card"><h3>Verification</h3><div id="deleg-verification"></div></div>' +
+      "</div>";
+    renderDelegActions(d);
+    updateDelegationLive(d);
+  }
+
+  function delegStatsHtml(d, p, elapsed) {
+    return statCard("Status", d.status.replace(/_/g, " "), "updated " + ago(d.updated_at)) +
+      statCard("Progress", p.done + " / " + p.total, p.pct + "% of subtasks completed") +
+      statCard("Resources", String(d.usage.model_calls) + " model calls",
+        d.usage.workers_launched + " workers · " + Math.round(elapsed) + "s elapsed") +
+      statCard("Plan", String(d.plan.length) + " subtasks",
+        "budgets: ≤" + (d.budgets.max_workers || "—") + " workers, ≤" +
+        (d.budgets.max_concurrent || "—") + " concurrent");
+  }
+
+  function updateDelegationLive(d) {
+    var p = delegProgress(d);
+    var elapsed = Math.max(0, (delegActive(d.status) ? Date.now() / 1000 : d.updated_at) - d.created_at);
+    var stats = document.getElementById("deleg-stats");
+    if (stats) stats.innerHTML = delegStatsHtml(d, p, elapsed);
+    var tb = document.getElementById("deleg-workers");
+    if (tb) {
+      tb.innerHTML = d.workers.map(function (w) {
+        var deps = (w.depends_on || []).map(function (x) {
+          return '<span class="dep">' + esc(x) + "</span>";
+        }).join(" ") || "<span class='stat-sub'>—</span>";
+        var sum = w.summary || w.error || "";
+        return "<tr class='rowlink' data-wid='" + esc(w.subtask_id) + "' tabindex='0'>" +
+          "<td><strong>" + esc(w.name) + "</strong><br><span class='mono stat-sub'>" + esc(w.subtask_id) + "</span></td>" +
+          "<td class='mono'>" + esc(w.kind === "tool" ? "tool:" + w.tool : w.profile) + "</td>" +
+          "<td>" + pill(w.status) + "</td>" +
+          "<td>" + deps + "</td>" +
+          "<td class='mono'>" + esc(String(w.attempts)) + "</td>" +
+          "<td class='stat-sub'>" + esc(sum.length > 90 ? sum.slice(0, 90) + "…" : sum) + "</td></tr>";
+      }).join("");
+      tb.querySelectorAll("[data-wid]").forEach(function (tr) {
+        function open() { workerModal(tr.getAttribute("data-wid")); }
+        tr.addEventListener("click", open);
+        tr.addEventListener("keydown", function (e) { if (e.key === "Enter") open(); });
+      });
+    }
+    var arts = document.getElementById("deleg-artifacts");
+    if (arts) {
+      arts.innerHTML = (d.artifacts && d.artifacts.length)
+        ? "<ul class='artifacts'>" + d.artifacts.map(function (a) {
+            return "<li><span class='mono'>" + esc(a.name) + "</span> " +
+              "<span class='stat-sub'>v" + esc(String(a.version)) + " · " + esc((a.worker_id || "").slice(0, 10)) + "</span></li>";
+          }).join("") + "</ul>"
+        : "<p class='stat-sub'>No artifacts promoted yet.</p>";
+    }
+    var ver = document.getElementById("deleg-verification");
+    if (ver) {
+      ver.innerHTML = d.verification
+        ? "<pre class='output'>" + esc(JSON.stringify(d.verification, null, 2).slice(0, 3000)) + "</pre>"
+        : "<p class='stat-sub'>No verification report yet. Verification runs when the mission finishes.</p>";
+    }
+    renderDelegActions(d);
+  }
+
+  function renderDelegActions(d) {
+    var el = document.getElementById("deleg-actions");
+    if (!el) return;
+    var html = "";
+    var failed = d.workers.some(function (w) { return w.status === "failed"; });
+    if (delegActive(d.status)) {
+      html += '<button class="btn danger" id="deleg-cancel">Cancel mission</button>';
+    }
+    if ((d.status === "completed" || d.status === "failed") && failed) {
+      html += '<button class="btn" id="deleg-retry">Retry failed subtasks</button>';
+    }
+    var planner = d.workers.filter(function (w) {
+      return w.profile === "planner" && w.status === "completed";
+    });
+    if (planner.length) {
+      html += '<button class="btn" id="deleg-launch-plan">Launch plan as mission</button>';
+    }
+    el.innerHTML = html;
+    var c = document.getElementById("deleg-cancel");
+    if (c) c.addEventListener("click", function () {
+      if (!confirm("Cancel this mission? Running workers will stop at the next checkpoint.")) return;
+      api("/api/delegations/" + encodeURIComponent(d.mission_id) + "/cancel", { method: "POST" })
+        .then(function () { toast("Cancel requested", "ok"); renderDelegationDetail(d.mission_id); })
+        .catch(function (e) { toast(e.message, "bad"); });
+    });
+    var r = document.getElementById("deleg-retry");
+    if (r) r.addEventListener("click", function () {
+      api("/api/delegations/" + encodeURIComponent(d.mission_id) + "/retry", { method: "POST" })
+        .then(function (nd) {
+          toast("Retry launched: " + nd.mission_id.slice(0, 10), "ok");
+          location.hash = "#/agents/" + nd.mission_id;
+        })
+        .catch(function (e) { toast(e.message, "bad"); });
+    });
+    var lp = document.getElementById("deleg-launch-plan");
+    if (lp) lp.addEventListener("click", function () { launchFromPlanner(planner[0]); });
+  }
+
+  function workerModal(subtaskId) {
+    var d = delegDetailCache;
+    if (!d) return;
+    var w = d.workers.filter(function (x) { return x.subtask_id === subtaskId; })[0];
+    if (!w) return;
+    var res = (d.results && d.results[subtaskId]) || {};
+    var evidence = res.evidence ? JSON.stringify(res.evidence, null, 2) : "";
+    if (evidence.length > 3000) evidence = evidence.slice(0, 3000) + "…";
+    modal(
+      "<h2>" + esc(w.name) + ' <span class="mono stat-sub">' + esc(w.subtask_id) + "</span></h2>" +
+      "<p>" + pill(w.status) + ' <span class="mono stat-sub">' +
+      esc(w.kind === "tool" ? "tool: " + w.tool : w.profile) + " · " + esc(String(w.attempts)) + " attempt(s)</span></p>" +
+      (w.goal ? '<label class="field"><span>Instructions</span><pre class="output">' + esc(w.goal) + "</pre></label>" : "") +
+      (w.depends_on && w.depends_on.length ? '<p class="stat-sub">Depends on: ' +
+        w.depends_on.map(function (x) { return '<span class="dep">' + esc(x) + "</span>"; }).join(" ") + "</p>" : "") +
+      (w.acceptance_criteria && w.acceptance_criteria.length ? '<label class="field"><span>Acceptance criteria</span><ul class="crit">' +
+        w.acceptance_criteria.map(function (c) { return "<li>" + esc(typeof c === "string" ? c : JSON.stringify(c)) + "</li>"; }).join("") +
+        "</ul></label>" : "") +
+      (w.summary ? '<label class="field"><span>Summary</span><pre class="output">' + esc(w.summary) + "</pre></label>" : "") +
+      (w.errors && w.errors.length ? '<label class="field"><span>Errors</span><pre class="output err">' +
+        esc(w.errors.join("\n")) + "</pre></label>" : "") +
+      (w.error ? '<label class="field"><span>Task error</span><pre class="output err">' + esc(w.error) + "</pre></label>" : "") +
+      (evidence ? '<label class="field"><span>Evidence</span><pre class="output">' + esc(evidence) + "</pre></label>" : "") +
+      (w.artifacts && w.artifacts.length ? '<p class="stat-sub">Artifacts: ' +
+        w.artifacts.map(function (a) { return '<span class="mono">' + esc(a) + "</span>"; }).join(", ") + "</p>" : "") +
+      (w.task_id ? '<p><a href="#/tasks/' + esc(w.task_id) + '">Open worker task →</a></p>' : "") +
+      '<div class="actions"><button class="btn" id="wm-close">Close</button></div>'
+    );
+    document.getElementById("wm-close").addEventListener("click", closeModal);
+  }
+
+  function launchFromPlanner(w) {
+    var d = delegDetailCache;
+    var res = (d.results && d.results[w.subtask_id]) || {};
+    var text = res.summary || "";
+    var m = text.match(/\{[\s\S]*\}/);
+    if (!m) { toast("Could not find a JSON plan in the planner output.", "bad"); return; }
+    var parsed;
+    try { parsed = JSON.parse(m[0]); }
+    catch (e) { toast("Planner output is not valid JSON.", "bad"); return; }
+    var subs = parsed.subtasks || parsed.plan || [];
+    if (!Array.isArray(subs) || !subs.length) { toast("No subtasks found in the plan.", "bad"); return; }
+    var mapped = subs.map(function (s, i) {
+      return {
+        id: String(s.id || ("s" + i)),
+        name: String(s.name || s.id || ("subtask-" + i)),
+        kind: "agent",
+        profile: WORKER_PROFILE_FALLBACK(s.profile),
+        goal: String(s.goal || ""),
+        depends_on: Array.isArray(s.depends_on) ? s.depends_on.map(String) : [],
+        acceptance_criteria: Array.isArray(s.acceptance_criteria) ? s.acceptance_criteria : [],
+        max_retries: 2,
+      };
+    }).filter(function (s) { return s.goal; });
+    if (!mapped.length) { toast("Plan subtasks have no goals.", "bad"); return; }
+    newMissionModal({ goal: d.goal, subtasks: mapped });
+  }
+
+  function WORKER_PROFILE_FALLBACK(name) {
+    var known = (delegProfiles || []).map(function (p) { return p.name; });
+    return known.indexOf(name) !== -1 ? name : "researcher";
   }
 
   /* ---------- boot ---------- */
