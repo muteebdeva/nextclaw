@@ -65,6 +65,20 @@ class TaskStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_steps_task ON steps(task_id, ord)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS turns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    ord INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(task_id) REFERENCES tasks(id)
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_task ON turns(task_id, ord)")
 
     # -- tasks -----------------------------------------------------------
     def create_task(self, goal: str, task_type: str, params: Dict[str, Any]) -> str:
@@ -184,3 +198,34 @@ class TaskStore:
                 (time.time(), task_id),
             )
             return cur.rowcount
+
+    # -- turns (LLM conversation persistence) ---------------------------
+    def add_turn(self, task_id: str, role: str, content: Dict[str, Any]) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(ord), -1) FROM turns WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            nxt = int(row[0]) + 1
+            cur = conn.execute(
+                "INSERT INTO turns (task_id, ord, role, content_json, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (task_id, nxt, role, json.dumps(content), time.time()),
+            )
+            return int(cur.lastrowid)
+
+    def get_turns(self, task_id: str) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT role, content_json FROM turns WHERE task_id = ? ORDER BY ord",
+                (task_id,),
+            ).fetchall()
+            return [
+                {"role": r["role"], **json.loads(r["content_json"])} for r in rows
+            ]
+
+    def count_turns(self, task_id: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM turns WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return int(row[0])

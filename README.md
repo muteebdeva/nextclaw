@@ -53,6 +53,33 @@ python3 -m nextclaw.cli bench     # reproducible benchmark suite
 python3 -m nextclaw.cli cycle     # autonomous dev cycle: runs tests, records state
 ```
 
+## Real-model agent (`run-agent`)
+
+The deterministic `run` planner is kept, but the platform now also supports
+live model reasoning with a tool-calling loop:
+
+```bash
+export NEXTCLAW_GEMINI_API_KEY="..."   # never commit this
+python3 -m nextclaw.cli run-agent \
+  --goal "Count the Python files under src and write a verified report to reports/r.md" \
+  --verify-tool verify.file_report \
+  --verify-arg report_path=reports/r.md \
+  --verify-arg root=src \
+  --verify-arg pattern='**/*.py'
+```
+
+The model plans in its own words, calls tools, and sees real outputs. Every
+turn and tool call is checkpointed to SQLite, so `resume` continues an
+interrupted run from the persisted conversation. When the task's verifier
+reports `ok:true`, the loop stops on the explicit success criterion instead
+of letting the model second-guess a verified result. Unconfigured providers
+(Gemini without a key, unreachable Ollama) fail closed with a clear error.
+
+Provider selection: `NEXTCLAW_LLM_PROVIDER` (`gemini` default, `ollama`
+supported where local models are feasible), `NEXTCLAW_LLM_MODEL`
+(default `gemini-3.7-flash`), `NEXTCLAW_OLLAMA_URL` / `NEXTCLAW_OLLAMA_MODEL`
+for local.
+
 Or run the self-contained demo (uses temp dirs, touches nothing real):
 
 ```bash
@@ -69,8 +96,11 @@ python3 examples/demo.py
 
 ## Limitations (MVP)
 
-- One supported task type (`file_report`); other goals fail closed with a clear error.
-- Default planner is deterministic (`stub`); LLM providers are pluggable but
-  unconfigured providers refuse to run rather than hallucinate.
+- Deterministic `run` supports one task type (`file_report`); other goals fail
+  closed with a clear error. `run-agent` handles open-ended goals but needs a
+  configured model provider and (for machine verification) a `--verify-tool`.
+- LLM providers are real but quota-bound: the Gemini free tier can return
+  429/503, which the loop surfaces as a failed task with the provider's
+  message (429/503 are retried with backoff first).
 - No messaging channels, browser automation, scheduler, or web dashboard yet -
   these are roadmap items, not claims.

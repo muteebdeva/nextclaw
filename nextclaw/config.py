@@ -40,6 +40,13 @@ class Config:
     step_timeout_s: int = 30
     model_provider: str = "stub"
     max_report_chars: int = 200_000
+    # Real-LLM settings (milestone 1). Defaults are explicit; unconfigured
+    # providers fail closed instead of pretending to work.
+    llm_provider: str = "gemini"
+    llm_model: str = "gemini-3.7-flash"
+    llm_timeout_s: int = 60
+    max_turns: int = 12
+    task_timeout_s: int = 600
 
 
 def load_config(path: str | None = None, overrides: dict | None = None) -> Config:
@@ -73,6 +80,11 @@ def load_config(path: str | None = None, overrides: dict | None = None) -> Confi
         step_timeout_s=int(data.get("step_timeout_s", 30)),
         model_provider=(env_provider or data.get("model_provider", "stub")),
         max_report_chars=int(data.get("max_report_chars", 200_000)),
+        llm_provider=os.environ.get("NEXTCLAW_LLM_PROVIDER", data.get("llm_provider", "gemini")),
+        llm_model=os.environ.get("NEXTCLAW_LLM_MODEL", data.get("llm_model", "gemini-3.7-flash")),
+        llm_timeout_s=int(os.environ.get("NEXTCLAW_LLM_TIMEOUT_S", data.get("llm_timeout_s", 60))),
+        max_turns=int(data.get("max_turns", 12)),
+        task_timeout_s=int(data.get("task_timeout_s", 600)),
     )
 
 

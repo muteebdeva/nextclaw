@@ -35,8 +35,16 @@
   call; `reset_running_steps()` makes crash recovery safe.
 - `memory.py` - structured memory with text/tags/source/timestamps and
   keyword recall.
-- `agent.py` - planner invocation, permission-checked execution, per-step
-  verifiers, bounded retries, evidence building, completion memory.
+- `agent.py` - deterministic planner invocation, permission-checked execution,
+  per-step verifiers, bounded retries, evidence building, completion memory.
+- `agent_llm.py` - live-model tool-calling loop: the model plans in its own
+  words, calls tools, inspects real outputs. Turns + tool calls checkpointed
+  to the `turns` table; resume continues the persisted conversation.
+  Stops on the task's explicit verifier (`ok:true`) to prevent second-guessing.
+- `llm.py` - real provider abstraction (`GeminiProvider` with function
+  calling incl. thoughtSignature round-trip, `OllamaProvider` for local
+  models). Keys only from environment; unconfigured providers fail closed.
+  429/503 are retried with bounded backoff.
 - `bench.py` - reproducible benchmark suite (runs the real code).
 - `cycle.py` - autonomous dev cycle: runs tests, records state, picks next
   roadmap item.

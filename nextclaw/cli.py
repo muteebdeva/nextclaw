@@ -74,8 +74,17 @@ def cmd_run(args, cfg: Config) -> int:
 
 
 def cmd_resume(args, cfg: Config) -> int:
+    from . import agent_llm
+    from .tasks import TaskStore as _TS
+
+    ensure_data_dir(cfg)
+    task = _TS(cfg.data_dir).get_task(args.task_id)
+    if task and task["task_type"] == "agent":
+        runner = lambda: agent_llm.run_llm_task(args.task_id, cfg, approvals=tuple(args.approve or ()))
+    else:
+        runner = lambda: agent.run_task(args.task_id, cfg, approvals=tuple(args.approve or ()))
     try:
-        task = agent.run_task(args.task_id, cfg, approvals=tuple(args.approve or ()))
+        task = runner()
     except RuntimeError as exc:
         print(f"interrupted: {exc}")
         return 2
@@ -152,6 +161,33 @@ def cmd_cycle(args, cfg: Config) -> int:
     return 0
 
 
+def cmd_run_agent(args, cfg: Config) -> int:
+    from . import agent_llm
+
+    verify = None
+    if args.verify_tool:
+        verify = {"tool": args.verify_tool, "args": _parse_params(args.verify_arg)}
+    task_id = agent_llm.create_agent_task(args.goal, cfg, verify=verify)
+    print(f"task: {task_id} (llm provider: {cfg.llm_provider}/{cfg.llm_model})")
+    try:
+        task = agent_llm.run_llm_task(task_id, cfg, approvals=tuple(args.approve or ()))
+    except RuntimeError as exc:
+        print(f"interrupted: {exc}")
+        print(f"resume with: python3 -m nextclaw.cli resume --task-id {task_id}")
+        return 2
+    print(f"status: {task['status']}")
+    if task["status"] == "awaiting_approval":
+        print(f"blocked: {task['error']}")
+        print("re-run resume with --approve <tool-name> after human approval")
+        return 3
+    if task["status"] == "failed":
+        print(f"error: {task['error']}")
+        return 1
+    print("result:")
+    print(json.dumps(task["result"], indent=2))
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="nextclaw", description="NextClaw MVP agent platform")
     parser.add_argument("--data-dir", default=None)
@@ -165,6 +201,13 @@ def main(argv=None) -> int:
     p.add_argument("--type", default="file_report")
     p.add_argument("--param", action="append", default=[])
     p.add_argument("--approve", action="append", default=[])
+
+    p = sub.add_parser("run-agent", help="Run a goal with live model reasoning + tools")
+    p.add_argument("--goal", required=True)
+    p.add_argument("--verify-tool", default=None)
+    p.add_argument("--verify-arg", action="append", default=[])
+    p.add_argument("--approve", action="append", default=[])
+    p.add_argument("--provider", default=None)
 
     p = sub.add_parser("resume")
     p.add_argument("--task-id", required=True)
@@ -193,11 +236,14 @@ def main(argv=None) -> int:
         overrides["data_dir"] = args.data_dir
     if args.workspace:
         overrides["workspace_root"] = args.workspace
+    if getattr(args, "provider", None):
+        overrides["llm_provider"] = args.provider
     cfg = load_config(overrides=overrides)
 
     handlers = {
         "init": lambda: cmd_init(cfg),
         "run": lambda: cmd_run(args, cfg),
+        "run-agent": lambda: cmd_run_agent(args, cfg),
         "resume": lambda: cmd_resume(args, cfg),
         "status": lambda: cmd_status(args, cfg),
         "remember": lambda: cmd_remember(args, cfg),
