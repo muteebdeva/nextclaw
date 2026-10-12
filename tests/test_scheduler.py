@@ -1,10 +1,9 @@
-import os
 import tempfile
 import time
 import unittest
 
 from nextclaw.config import Config, ensure_data_dir
-from nextclaw.scheduler import Scheduler, SchedulerStore, DEV_CYCLE_JOB
+from nextclaw.scheduler import Scheduler, DEV_CYCLE_JOB
 
 
 def _cfg():

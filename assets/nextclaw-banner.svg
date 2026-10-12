@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" role="img" aria-label="NextClaw banner">
+  <defs>
+    <linearGradient id="blade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7AA2FF"/>
+      <stop offset="1" stop-color="#2E5BFF"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.18" cy="0.5" r="0.55">
+      <stop offset="0" stop-color="#2E5BFF" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#2E5BFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2E5BFF"/>
+      <stop offset="1" stop-color="#2E5BFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="360" fill="#0B0E14"/>
+  <rect width="1200" height="360" fill="url(#glow)"/>
+  <!-- claw mark -->
+  <g transform="translate(96,64)">
+    <path d="M28 8 L58 8 L36 224 L6 224 Z" fill="url(#blade)"/>
+    <path d="M82 8 L112 8 L90 224 L60 224 Z" fill="url(#blade)" opacity="0.85"/>
+    <path d="M136 8 L166 8 L144 224 L114 224 Z" fill="url(#blade)" opacity="0.7"/>
+  </g>
+  <!-- wordmark -->
+  <text x="330" y="172" font-family="Inter,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="84" font-weight="700" fill="#F2F5FA" letter-spacing="-1">NextClaw</text>
+  <text x="332" y="222" font-family="Inter,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="27" font-weight="400" fill="#9AA7BD">The reliability-first AI agent platform.</text>
+  <!-- feature chips -->
+  <g font-family="Inter,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="17" fill="#B9C6DC">
+    <rect x="332" y="252" width="208" height="40" rx="20" fill="#141B2A" stroke="#2E5BFF" stroke-opacity="0.45"/>
+    <text x="352" y="278">Verified execution</text>
+    <rect x="556" y="252" width="196" height="40" rx="20" fill="#141B2A" stroke="#2E5BFF" stroke-opacity="0.45"/>
+    <text x="576" y="278">Persistent tasks</text>
+    <rect x="768" y="252" width="232" height="40" rx="20" fill="#141B2A" stroke="#2E5BFF" stroke-opacity="0.45"/>
+    <text x="788" y="278">Permission-checked tools</text>
+  </g>
+  <rect x="0" y="356" width="1200" height="4" fill="url(#accent)"/>
+</svg>

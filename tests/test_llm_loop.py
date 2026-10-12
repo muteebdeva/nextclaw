@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from nextclaw import agent_llm, llm as llm_mod, tools
+from nextclaw import agent_llm, llm as llm_mod
 from nextclaw.config import Config, ensure_data_dir
 from nextclaw.tasks import TaskStore
 
@@ -263,6 +263,14 @@ class QuotaTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"NEXTCLAW_OFFLINE": "1"}):
             with self.assertRaises(llm_mod.NotConfigured):
                 llm_mod.llm_provider(self.cfg)
+
+    def test_unconfigured_provider_fails_task_gracefully(self):
+        tid = agent_llm.create_agent_task("needs a model", self.cfg)
+        with mock.patch.dict(os.environ, {"NEXTCLAW_OFFLINE": "1",
+                                           "NEXTCLAW_GEMINI_API_KEY": ""}):
+            task = agent_llm.run_llm_task(tid, self.cfg)  # provider=None
+        self.assertEqual(task["status"], "failed")
+        self.assertIn("offline mode", task["error"])
 
 
 if __name__ == "__main__":

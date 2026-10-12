@@ -1,0 +1,20 @@
+[project]
+name = "nextclaw"
+version = "0.1.0"
+description = "The reliability-first AI agent platform: verified execution, persistent tasks, permission-checked tools."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "TBD" }
+authors = [{ name = "Muteeb Deva" }]
+keywords = ["ai", "agents", "llm", "automation"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved",
+    "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/muteebdeva/nextclaw"
+Repository = "https://github.com/muteebdeva/nextclaw"
+Issues = "https://github.com/muteebdeva/nextclaw/issues"

@@ -3,7 +3,6 @@
 These only run with NEXTCLAW_LIVE_TESTS=1 and a configured API key, so the
 normal suite never burns quota or depends on the network.
 """
-import json
 import os
 import tempfile
 import unittest

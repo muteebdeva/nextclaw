@@ -100,10 +100,15 @@ def run_llm_task(
     store.set_task_status(task_id, "running")
     task = store.get_task(task_id)
     params = task["params"]
-    goal = task["goal"]
 
     if provider is None:
-        provider = llm_mod.llm_provider(cfg)
+        try:
+            provider = llm_mod.llm_provider(cfg)
+        except llm_mod.ProviderError as exc:
+            # Fail the task with a clear message instead of a traceback;
+            # e.g. missing NEXTCLAW_GEMINI_API_KEY or offline mode.
+            store.set_task_status(task_id, "failed", error=str(exc))
+            return store.get_task(task_id)
     budget = llm_mod.RequestBudget(cfg.data_dir)
     declarations = llm_mod.build_declarations(cfg.allowed_tools)
     deadline = time.time() + cfg.task_timeout_s

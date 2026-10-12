@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="NextClaw logo">
+  <defs>
+    <linearGradient id="blade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7AA2FF"/>
+      <stop offset="1" stop-color="#2E5BFF"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="58" fill="#0B0E14"/>
+  <rect width="256" height="256" rx="58" fill="url(#sheen)"/>
+  <!-- three claw slashes -->
+  <path d="M70 48 L100 48 L78 208 L48 208 Z" fill="url(#blade)"/>
+  <path d="M124 48 L154 48 L132 208 L102 208 Z" fill="url(#blade)" opacity="0.85"/>
+  <path d="M178 48 L208 48 L186 208 L156 208 Z" fill="url(#blade)" opacity="0.7"/>
+  <!-- grounding baseline -->
+  <rect x="48" y="208" width="160" height="6" rx="3" fill="#2E5BFF" opacity="0.35"/>
+</svg>

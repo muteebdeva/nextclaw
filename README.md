@@ -1,145 +1,237 @@
-# NextClaw (MVP 0.1.0)
+<p align="center">
+  <img src="assets/nextclaw-banner.svg" alt="NextClaw — the reliability-first AI agent platform" width="100%">
+</p>
 
-An original, open-source AI agent platform focused on **measurable reliability**:
-explicit success criteria, persistent resumable tasks, permission-checked tools,
-structured memory, and reproducible benchmarks.
+<p align="center">
+  <a href="https://github.com/muteebdeva/nextclaw/actions/workflows/ci.yml"><img src="https://github.com/muteebdeva/nextclaw/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero dependencies">
+</p>
 
-> Status: working vertical slice. It accepts a goal, plans explicit steps, runs
-> permission-checked tools, verifies each step against real tool output, persists
-> state to SQLite, and resumes after an interrupted run. See
-> [COMPARISON.md](COMPARISON.md) for an honest comparison and
-> [SPEC.md](SPEC.md) for the full product spec.
+# NextClaw
 
-## Install
-
-Zero dependencies. Python 3.10+ only.
+**The reliability-first AI agent platform.** NextClaw runs AI agents that plan,
+use tools, and *prove* their work: every task has explicit success criteria,
+every step is verified against real tool output, and every run is checkpointed
+to SQLite so interrupted tasks resume instead of restarting.
 
 ```bash
-cd ~/workspace/nextclaw
+git clone https://github.com/muteebdeva/nextclaw.git
+cd nextclaw
 python3 -m nextclaw.cli init
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests   # 44 tests, zero dependencies, no API key needed
 ```
 
-## Quickstart: a verified file report
+## What makes it different
+
+Most agent frameworks trust the model's word. NextClaw doesn't:
+
+- **Verified execution** — a task is only "done" when a verifier confirms the
+  result against recomputed evidence (not when the model says so).
+- **Persistent autonomy** — tasks survive crashes and restarts via SQLite
+  checkpoints; resume never repeats completed work.
+- **Permission-checked tools** — allowlisted tools, workspace confinement,
+  destructive-command denylist, secret redaction, and human approval for
+  high-risk actions.
+- **Quota-safe by design** — API budgets, exhaustion cooldowns, and an offline
+  mode protect shared keys.
+
+## Quickstart: a verified agent run
+
+No API key needed — the deterministic planner runs fully offline:
 
 ```bash
-python3 -m nextclaw.cli run \
-  --goal "Count Python files under nextclaw/nextclaw and write a verified report" \
+python3 -m nextclaw.cli --workspace . run \
+  --goal "Count the Python files and write a verified report" \
   --type file_report \
-  --param root=nextclaw/nextclaw \
-  --param pattern='**/*.py' \
-  --param output=reports/mvp-report.md
+  --param root=nextclaw --param pattern='**/*.py' \
+  --param output=reports/quickstart.md
 ```
 
-What happens:
+The agent plans 4 steps (collect → measure → write → verify), executes each
+through the permission system, checkpoints to SQLite, then **recomputes the
+measurements** and compares them against the report's claimed totals:
 
-1. The planner produces an explicit 4-step plan (collect -> measure -> write -> verify).
-2. Each step runs through the permission system (workspace-confined, denylisted
-   commands blocked, high-risk tools need `--approve`).
-3. Each step is verified against real tool output (not the model's claims).
-4. State is checkpointed to SQLite after every step; `resume` continues a
-   crashed run without repeating completed steps.
-5. The final report is re-verified by recomputation; a SHA-256 and counts are
-   returned as evidence, and completion is written to long-term memory.
-
-Other commands:
-
-```bash
-python3 -m nextclaw.cli status --task-id <id>
-python3 -m nextclaw.cli resume --task-id <id> [--approve exec.run]
-python3 -m nextclaw.cli remember --text "prefers terse replies" --tag pref
-python3 -m nextclaw.cli recall --query "prefers"
-python3 -m nextclaw.cli bench     # reproducible benchmark suite
-python3 -m nextclaw.cli cycle     # autonomous dev cycle: runs tests, records state
+```json
+{
+  "report_path": "reports/quickstart.md",
+  "sha256": "e5e9dabade42914a9f75f10b1d8108e3dc845537df81ec284d519372b62e0996",
+  "total_files": 13,
+  "total_lines": 2791,
+  "verified": true
+}
 ```
 
-## Real-model agent (`run-agent`)
+## Real-model agents (`run-agent`)
 
-The deterministic `run` planner is kept, but the platform now also supports
-live model reasoning with a tool-calling loop:
+With an API key, the model itself reasons, picks tools, and inspects real
+outputs in a tool-calling loop:
 
 ```bash
-export NEXTCLAW_GEMINI_API_KEY="..."   # never commit this
+export NEXTCLAW_GEMINI_API_KEY="your-key-here"
 python3 -m nextclaw.cli run-agent \
   --goal "Count the Python files under src and write a verified report to reports/r.md" \
   --verify-tool verify.file_report \
   --verify-arg report_path=reports/r.md \
-  --verify-arg root=src \
-  --verify-arg pattern='**/*.py'
+  --verify-arg root=src --verify-arg pattern='**/*.py'
 ```
 
-The model plans in its own words, calls tools, and sees real outputs. Every
-turn and tool call is checkpointed to SQLite, so `resume` continues an
-interrupted run from the persisted conversation. When the task's verifier
-reports `ok:true`, the loop stops on the explicit success criterion instead
-of letting the model second-guess a verified result. Unconfigured providers
-(Gemini without a key, unreachable Ollama) fail closed with a clear error.
+Every turn is persisted, so `resume --task-id <id>` continues an interrupted
+run from the saved conversation. If the verifier reports `ok:true`, the loop
+stops on the explicit success criterion instead of second-guessing it.
 
-Provider selection: `NEXTCLAW_LLM_PROVIDER` (`gemini` default, `ollama`
-supported where local models are feasible), `NEXTCLAW_LLM_MODEL`
-(default `gemini-3.7-flash`), `NEXTCLAW_OLLAMA_URL` / `NEXTCLAW_OLLAMA_MODEL`
-for local.
+### Providers
 
-### Quota protection
+| Provider | Setup | Status |
+|---|---|---|
+| **Gemini** (default) | `NEXTCLAW_GEMINI_API_KEY` | Function calling verified working with `gemini-3.7-flash`; quota-guarded |
+| **Ollama** | `NEXTCLAW_OLLAMA_URL` + `NEXTCLAW_OLLAMA_MODEL` | Implemented; not tested in this environment (needs local models) |
 
-The Gemini key may be shared (e.g. with a Telegram bot), so the agent
-protects it aggressively:
+An OpenAI-compatible provider interface exists but is not yet implemented —
+it fails closed with a clear error rather than pretending to work.
 
-- 429s mentioning quota/billing raise `QuotaExhausted`: **no retries**.
-  Transient 429/503s are retried with backoff, respecting `Retry-After`.
-- After a quota-exhaustion, a cooldown (default 1h, `llm_quota_cooldown_s`)
-  fails fast **without any HTTP call**.
-- Daily request cap (default 200, `NEXTCLAW_LLM_MAX_PER_DAY`) and per-task
-  cap (default 40 model calls).
-- `NEXTCLAW_OFFLINE=1` disables all model calls (fail closed).
-- Scheduler-driven dev cycles never call the LLM at all.
-- Keys live only in environment variables; they are never printed, logged,
-  or committed.
+## How it works
 
-## Scheduler: autonomous dev cycles every 40 minutes
+```mermaid
+flowchart LR
+    A[Goal] --> B{Planner}
+    B -->|deterministic| C[Explicit step plan]
+    B -->|run-agent| D[LLM tool-calling loop]
+    C --> E[Permission check]
+    D --> E
+    E --> F[Execute tool]
+    F --> G[Verify against real output]
+    G --> H[(SQLite checkpoint)]
+    H -->|more steps| E
+    H -->|verifier ok| I[Done + evidence]
+    G -->|failed| J[Bounded retry → fail with diagnosis]
+```
+
+- **Planning** — `run` uses an explicit deterministic planner; `run-agent`
+  lets the model plan in its own words via function calling.
+- **Tools** — 7 built-ins: `fs.list`, `fs.read`, `fs.write`, `fs.hash`,
+  `fs.measure`, `verify.file_report`, `exec.run`. All run through one
+  permission policy.
+- **Verification** — verifiers recompute results independently. A wrong report
+  fails the task with a diagnosis; the model can read the error and try again.
+- **Checkpoints** — task state, steps, and conversation turns persist after
+  every tool call. Crash recovery is tested, not assumed.
+- **Safety rails** — bounded turns (default 12), bounded retries (3),
+  task deadlines, per-task and daily API budgets, approvals for high-risk
+  tools, secret redaction on all tool output.
+
+## Autonomous dev cycles
+
+A persistent scheduler runs the test suite and records project state every
+40 minutes:
 
 ```bash
-python3 -m nextclaw.cli scheduler ensure   # create the 40-min dev-cycle job
-python3 -m nextclaw.cli scheduler start    # start the persistent daemon
+python3 -m nextclaw.cli scheduler ensure   # create the 40-minute job
+python3 -m nextclaw.cli scheduler start    # start the daemon
 python3 -m nextclaw.cli scheduler status   # jobs, next runs, last outcomes
-python3 -m nextclaw.cli scheduler run-now  # manual trigger (same safe path)
-python3 -m nextclaw.cli scheduler stop     # stop the daemon
+python3 -m nextclaw.cli scheduler run-now  # manual trigger
+python3 -m nextclaw.cli scheduler stop
 ```
 
-How it behaves:
+State survives restarts; overlapping runs are impossible by atomic claim;
+stale runs are marked `interrupted` on recovery. Scheduler cycles never call
+the LLM, so they burn no quota.
 
-- Job state, run history, timestamps, and results persist in SQLite
-  (`scheduler.db`); a restart loses nothing.
-- Jobs are claimed atomically — two schedulers can never run the same job
-  twice (duplicate start is refused via pidfile).
-- On startup, stale `running` runs are marked `interrupted` and stuck jobs
-  reset; a missed schedule gets one catch-up run, while outages over an
-  hour just reschedule (no stampede).
-- Each cycle runs in a subprocess with a hard timeout; the cycle itself runs
-  the test suite and records changes, results, and the next task — no LLM
-  calls, so no quota is burned.
+## Project structure
 
-Or run the self-contained demo (uses temp dirs, touches nothing real):
+```
+nextclaw/
+  nextclaw/
+    agent.py        # deterministic planner + verified executor
+    agent_llm.py    # live-model tool-calling loop
+    llm.py          # provider abstraction (Gemini, Ollama) + quota budgets
+    tools.py        # tool registry, permissions, sandbox, secret redaction
+    tasks.py        # SQLite task queue + step state machine + turns
+    memory.py       # structured long-term memory with provenance
+    scheduler.py    # persistent 40-min dev-cycle scheduler
+    bench.py        # reproducible benchmark suite
+    cli.py          # command-line interface
+    cycle.py        # autonomous dev-cycle runner
+  tests/            # 44 tests, all offline (live test env-gated)
+  examples/demo.py  # self-contained end-to-end demo (temp dirs only)
+  assets/           # logo, banner, social preview (SVG)
+  .github/          # CI, issue/PR templates
+```
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `NEXTCLAW_DATA_DIR` | `~/.nextclaw` | SQLite state, logs |
+| `NEXTCLAW_WORKSPACE` | `~/workspace` | agent workspace root (tools are confined here) |
+| `NEXTCLAW_MODEL_PROVIDER` | `stub` | deterministic planner provider |
+| `NEXTCLAW_LLM_PROVIDER` | `gemini` | `gemini` \| `ollama` |
+| `NEXTCLAW_LLM_MODEL` | `gemini-3.7-flash` | model name |
+| `NEXTCLAW_GEMINI_API_KEY` | — | required for `run-agent` with Gemini |
+| `NEXTCLAW_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama base URL |
+| `NEXTCLAW_OLLAMA_MODEL` | — | required for Ollama provider |
+| `NEXTCLAW_LLM_TIMEOUT_S` | `60` | per model-call timeout |
+| `NEXTCLAW_LLM_MAX_PER_DAY` | `200` | daily API request cap |
+| `NEXTCLAW_OFFLINE` | — | set to `1` to disable all model calls |
+
+Copy `.env.example` to `.env` for a documented starting point (never commit
+real keys).
+
+## Testing
 
 ```bash
-python3 examples/demo.py
+python3 -m unittest discover -s tests          # full suite, offline
+NEXTCLAW_LIVE_TESTS=1 python3 -m unittest tests.test_llm_live   # needs API key
+python3 examples/demo.py                        # end-to-end demo in temp dirs
+python3 -m nextclaw.cli bench                   # benchmark suite
 ```
 
-## Docs
+CI runs the suite on Python 3.10–3.12. The live-model test is skipped by
+default so CI and contributors never burn quota.
 
-- [SPEC.md](SPEC.md) - product vision, MVP scope, measurable benchmarks
-- [ARCHITECTURE.md](ARCHITECTURE.md) - module design and data flow
-- [BENCHMARKS.md](BENCHMARKS.md) - what the suite measures and how to run it
-- [COMPARISON.md](COMPARISON.md) - honest comparison with OpenClaw and alternatives
-- [ROADMAP.md](ROADMAP.md) - what comes next
+## Troubleshooting
 
-## Limitations (MVP)
+| Symptom | Cause / fix |
+|---|---|
+| `Gemini provider needs NEXTCLAW_GEMINI_API_KEY` | export the key, or use offline `run` |
+| `quota cooldown active` | free-tier quota exhausted; wait or raise `llm_quota_cooldown_s` |
+| `approval required for tool 'exec.run'` | resume with `--approve exec.run` after reviewing |
+| `path escapes workspace root` | tools are confined to `NEXTCLAW_WORKSPACE` by design |
+| `did not finish within 12 turns` | raise `max_turns`, or simplify the goal |
 
-- Deterministic `run` supports one task type (`file_report`); other goals fail
-  closed with a clear error. `run-agent` handles open-ended goals but needs a
-  configured model provider and (for machine verification) a `--verify-tool`.
-- LLM providers are real but quota-bound: the Gemini free tier can return
-  429/503, which the loop surfaces as a failed task with the provider's
-  message (429/503 are retried with backoff first).
-- No messaging channels, browser automation, scheduler, or web dashboard yet -
-  these are roadmap items, not claims.
+## Security
+
+- No secrets in code, docs, or git history — keys come only from the
+  environment. See [SECURITY.md](SECURITY.md).
+- Tool outputs are redacted for secret-like patterns before the model sees them.
+- `exec.run` never uses a shell, is denylisted for destructive patterns, is
+  confined to the workspace, and requires explicit human approval.
+- Unconfigured providers fail closed with a clear error.
+
+## Roadmap
+
+- [x] Verified deterministic task execution
+- [x] Live-model tool-calling loop (Gemini; Ollama implemented)
+- [x] Persistent 40-minute scheduler
+- [x] Quota budgets and cooldowns
+- [ ] Browser automation (allowlisted domains)
+- [ ] Web dashboard / Telegram interface
+- [ ] Multi-agent delegation
+- [ ] Head-to-head benchmark vs alternatives
+
+See [ROADMAP.md](ROADMAP.md) for detail.
+
+## Contributing
+
+Bug reports and pull requests are welcome. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) first — it covers the test suite, how to add
+tools and providers, and the no-fabrication rule: every claim needs a test.
+
+## License
+
+The license is being finalized (MIT proposed). Until `LICENSE` lands, all
+rights are reserved by the repository owner.
+
+---
+
+*Built with zero dependencies — Python's standard library only.*

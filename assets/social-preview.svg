@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-label="NextClaw social preview">
+  <defs>
+    <linearGradient id="blade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7AA2FF"/>
+      <stop offset="1" stop-color="#2E5BFF"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.22" cy="0.5" r="0.6">
+      <stop offset="0" stop-color="#2E5BFF" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#2E5BFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1280" height="640" fill="#0B0E14"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+  <g transform="translate(120,150)">
+    <path d="M40 12 L84 12 L52 340 L8 340 Z" fill="url(#blade)"/>
+    <path d="M118 12 L162 12 L130 340 L86 340 Z" fill="url(#blade)" opacity="0.85"/>
+    <path d="M196 12 L240 12 L208 340 L164 340 Z" fill="url(#blade)" opacity="0.7"/>
+  </g>
+  <text x="440" y="330" font-family="Inter,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="120" font-weight="700" fill="#F2F5FA" letter-spacing="-2">NextClaw</text>
+  <text x="444" y="400" font-family="Inter,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="36" font-weight="400" fill="#9AA7BD">The reliability-first AI agent platform.</text>
+  <text x="444" y="470" font-family="Inter,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="24" fill="#5B6B85">Verified execution · Persistent tasks · Permission-checked tools</text>
+  <text x="444" y="560" font-family="Inter,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="22" fill="#3E4C63">github.com/muteebdeva/nextclaw</text>
+</svg>
