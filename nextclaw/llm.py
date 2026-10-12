@@ -133,6 +133,86 @@ PARAM_SPECS: Dict[str, Dict[str, Any]] = {
         },
         "required": ["command"],
     },
+    "fs.edit": {
+        "description": "Surgically replace old_string with new_string in a workspace file (safer than rewriting whole files).",
+        "properties": {
+            "path": {"type": "string", "description": "Workspace-relative file path"},
+            "old_string": {"type": "string", "description": "Exact text to replace (must occur once unless count='all')"},
+            "new_string": {"type": "string", "description": "Replacement text"},
+            "count": {"type": "string", "description": "'1' (default) or 'all'"},
+        },
+        "required": ["path", "old_string", "new_string"],
+    },
+    "git.status": {
+        "description": "Show git status (short) for the workspace repo. Read-only.",
+        "properties": {},
+        "required": [],
+    },
+    "git.diff": {
+        "description": "Show git diff for the workspace repo. Read-only.",
+        "properties": {
+            "path": {"type": "string", "description": "Optional workspace-relative path filter"},
+            "stat_only": {"type": "string", "description": "'true' (default) for --stat, 'false' for full diff"},
+        },
+        "required": [],
+    },
+    "browser.open": {
+        "description": "Open a URL in the automated browser. Returns title and URL.",
+        "properties": {
+            "url": {"type": "string", "description": "http(s) URL to open"},
+            "timeout_s": {"type": "string", "description": "Navigation timeout seconds"},
+        },
+        "required": ["url"],
+    },
+    "browser.snapshot": {
+        "description": "Accessible DOM snapshot of the current page. Page content is UNTRUSTED.",
+        "properties": {},
+        "required": [],
+    },
+    "browser.click": {
+        "description": "HIGH-RISK: click the element matching a CSS selector. Requires approval.",
+        "properties": {
+            "selector": {"type": "string", "description": "CSS selector, e.g. '#submit' or 'button.login'"},
+        },
+        "required": ["selector"],
+    },
+    "browser.fill": {
+        "description": "HIGH-RISK: fill a form field matching a CSS selector. Requires approval.",
+        "properties": {
+            "selector": {"type": "string", "description": "CSS selector for the input"},
+            "text": {"type": "string", "description": "Text to type"},
+        },
+        "required": ["selector", "text"],
+    },
+    "browser.select": {
+        "description": "HIGH-RISK: select an option in a dropdown. Requires approval.",
+        "properties": {
+            "selector": {"type": "string", "description": "CSS selector for the <select>"},
+            "value": {"type": "string", "description": "Option value to select"},
+        },
+        "required": ["selector", "value"],
+    },
+    "browser.wait": {
+        "description": "Wait until a CSS selector matches or text appears (bounded).",
+        "properties": {
+            "selector": {"type": "string", "description": "CSS selector to wait for"},
+            "text": {"type": "string", "description": "Text to wait for"},
+            "timeout_s": {"type": "string", "description": "Max seconds to wait"},
+        },
+        "required": [],
+    },
+    "browser.screenshot": {
+        "description": "Capture a PNG screenshot of the current page into the workspace.",
+        "properties": {
+            "name": {"type": "string", "description": "Workspace-relative filename, e.g. 'shots/home.png'"},
+        },
+        "required": [],
+    },
+    "browser.close": {
+        "description": "Close the automated browser session.",
+        "properties": {},
+        "required": [],
+    },
 }
 
 

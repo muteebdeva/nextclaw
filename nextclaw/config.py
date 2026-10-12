@@ -27,11 +27,22 @@ DEFAULT_ALLOWED_TOOLS = (
     "fs.list",
     "fs.read",
     "fs.write",
+    "fs.edit",
     "fs.hash",
     "fs.measure",
+    "git.status",
+    "git.diff",
     "verify.file_report",
     "verify.file_write",
     "browser.fetch",
+    "browser.open",
+    "browser.snapshot",
+    "browser.click",
+    "browser.fill",
+    "browser.select",
+    "browser.wait",
+    "browser.screenshot",
+    "browser.close",
     "exec.run",
 )
 
@@ -61,6 +72,9 @@ class Config:
     # LLM quota protection
     llm_max_requests_per_day: int = 200
     llm_max_requests_per_task: int = 40
+    # Interactive browser policy (browsing.py; all optional)
+    browser_navigate_allowlist: tuple = ()  # e.g. ("example.com",); empty = allow all http(s)
+    browser_allow_file: bool = False  # allow file:// navigation (local testing)
     llm_quota_cooldown_s: int = 3600
 
 

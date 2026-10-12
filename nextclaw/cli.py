@@ -165,6 +165,77 @@ def cmd_cycle(args, cfg: Config) -> int:
     return 0
 
 
+def cmd_mission(args, cfg: Config) -> int:
+    """Long-running background missions: create/run/status/pause/resume/cancel."""
+    import json as _json
+    from .config import ensure_data_dir
+    from .missions import MissionStore, run_mission, resume_mission
+
+    ensure_data_dir(cfg)
+    store = MissionStore(cfg.data_dir)
+    action = args.mission_action
+
+    if action == "create":
+        if not args.goal:
+            print("mission create needs --goal")
+            return 2
+        plan = []
+        if args.plan:
+            with open(args.plan) as f:
+                plan = _json.load(f)
+        budgets = _json.loads(args.budgets) if args.budgets else {}
+        mid = store.create_mission(args.goal, plan=plan, budgets=budgets)
+        print(f"created mission {mid} ({len(plan)} steps)")
+        return 0
+
+    if action == "list":
+        for m in store.list_missions():
+            print(f"{m['id']}  {m['state']:20} {m['goal'][:70]}")
+        return 0
+
+    mid = args.id
+    if not mid:
+        print(f"mission {action} needs --id")
+        return 2
+
+    if action == "run":
+        final = run_mission(mid, cfg)
+        print(f"mission {mid}: {final['state']}"
+              + (f" ({final['error']})" if final.get("error") else ""))
+        return 0 if final["state"] == "completed" else 1
+    if action == "status":
+        m = store.get_mission(mid)
+        if not m:
+            print(f"unknown mission {mid}")
+            return 2
+        print(f"id:      {m['id']}\nstate:   {m['state']}\ngoal:    {m['goal']}\n"
+              f"error:   {m.get('error') or '-'}\n"
+              f"tool_calls: {m.get('tool_calls', 0)}")
+        for s in store.get_steps(mid):
+            print(f"  [{s['status']:9}] {s['name']} ({s['tool']})"
+                  + (f" attempts={s['attempts']}" if s["attempts"] > 1 else ""))
+        return 0
+    if action == "steps":
+        for s in store.get_steps(mid):
+            print(f"{s['ord']:3} [{s['status']:9}] {s['name']}")
+        return 0
+    if action == "pause":
+        store.request_pause(mid)
+        print(f"pause requested for {mid}")
+        return 0
+    if action == "cancel":
+        store.request_cancel(mid)
+        print(f"cancel requested for {mid}")
+        return 0
+    if action == "resume":
+        final = resume_mission(mid, cfg)
+        print(f"mission {mid}: {final['state']}"
+              + (f" ({final['error']})" if final.get("error") else ""))
+        return 0 if final["state"] == "completed" else 1
+    print(f"unknown mission action {action}")
+    return 2
+
+
 def cmd_providers(args, cfg: Config) -> int:
     from .providers import ProviderStore, build_provider, seed_from_legacy_config
     from .config import ensure_data_dir
@@ -412,6 +483,17 @@ def main(argv=None) -> int:
     p.add_argument("--id", default=None, help="Provider config id")
     p.add_argument("--name", default=None, help="Provider config name")
 
+    p = sub.add_parser("mission", help="Long-running background missions")
+    p.add_argument("mission_action",
+                   choices=["create", "run", "status", "pause", "resume",
+                            "cancel", "list", "steps"])
+    p.add_argument("--id", default=None, help="Mission id")
+    p.add_argument("--goal", default=None, help="Goal for 'create'")
+    p.add_argument("--plan", default=None,
+                   help="JSON plan file for 'create' (list of steps)")
+    p.add_argument("--budgets", default=None,
+                   help="JSON budgets for 'create', e.g. '{\"max_runtime_s\": 600}'")
+
     args = parser.parse_args(argv)
     overrides = {}
     if args.data_dir:
@@ -438,6 +520,7 @@ def main(argv=None) -> int:
         "cycle": lambda: cmd_cycle(args, cfg),
         "scheduler": lambda: cmd_scheduler(args, cfg),
         "providers": lambda: cmd_providers(args, cfg),
+        "mission": lambda: cmd_mission(args, cfg),
     }
     return handlers[args.cmd]()
 

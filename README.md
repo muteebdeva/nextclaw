@@ -304,11 +304,47 @@ from chat — they require the dashboard or CLI. Token via
 - [x] Task cancellation and audit log
 - [x] Browser research (fetch-only; interactive browsing needs headless Chromium)
 - [x] Telegram channel (opt-in)
+- [x] Self-debugging coding agent (fs.edit, git tools, debug discipline, regression checks)
+- [x] Interactive browser automation (CDP, stdlib-only; click/fill/select approval-gated)
+- [x] Long-running background missions (pause/resume, budgets, idempotency, restart recovery)
+- [x] Independent verification engine (acceptance criteria, pass/fail/inconclusive)
 - [ ] Multi-agent delegation
 - [ ] Cost/token accounting per task
 - [ ] Head-to-head benchmark vs alternatives
 
 See [ROADMAP.md](ROADMAP.md) for detail.
+
+## Autonomous execution
+
+NextClaw can now execute complex work independently:
+
+**Coding agent.** `fs.edit` (surgical patches), `git.status`/`git.diff`
+(read-only inspection), sandboxed `exec.run`, and a debugging discipline in
+the agent prompt: explore → plan with acceptance criteria → smallest patch →
+run tests → diagnose from real output → bounded retries → regression check.
+`run-agent` tasks accept `acceptance_criteria` (list of `{criterion, method,
+...}`); the loop verifies deterministically before finishing and routes
+failures back for up to `verify_retries` (default 2) correction attempts.
+
+**Browser automation.** `browser.open/snapshot/click/fill/select/wait/
+screenshot/close` drive headless Chromium over CDP (stdlib only, no new
+dependencies). Click/fill/select require approval. Page content is treated
+as untrusted; cookies and credentials never enter prompts. Navigation
+policy: `browser_navigate_allowlist` (empty = allow all http(s)),
+`browser_allow_file` (default false).
+
+**Background missions.** `nextclaw mission create/run/status/pause/resume/
+cancel/list` manages durable multi-step missions with explicit states
+(created → planning → running → verifying → completed, plus paused,
+waiting_for_approval, failed, cancelled). Steps checkpoint to SQLite,
+survive restarts (running steps reset; completed actions never repeat via
+idempotency keys), honor per-mission budgets (steps, tool calls, runtime),
+and gate approval-required tools through the existing approval store.
+
+**Verification engine** (`nextclaw/verify.py`). Deterministic checkers for
+`tests` (exit code), `files` (existence + content), `command` (exit +
+output), and `browser` (page state). Uncheckable criteria are
+**inconclusive**, never passed. Used by missions and the agent loop.
 
 ## Contributing
 
