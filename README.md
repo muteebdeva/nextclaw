@@ -36,6 +36,32 @@ Most agent frameworks trust the model's word. NextClaw doesn't:
 - **Quota-safe by design** — API budgets, exhaustion cooldowns, and an offline
   mode protect shared keys.
 
+## Web dashboard (new)
+
+NextClaw ships a real control plane — no terminal required:
+
+```bash
+python3 -m nextclaw.cli serve
+# → http://127.0.0.1:8765  (paste the printed API token to unlock)
+```
+
+- **Overview** — task stats, pending approvals, quota, next scheduled run
+- **Tasks** — create (deterministic or model-driven), filter, inspect the
+  execution timeline, tool calls with arguments/outputs, and verification
+  evidence; cancel or resume from checkpoints
+- **Approvals** — pending high-risk actions with full context; approve or
+  reject; every decision lands in the audit log
+- **Scheduler** — jobs, next runs, run history, enable/disable/run-now
+- **Providers** — Gemini/Ollama status, connectivity tests, safe config
+  (keys stay in environment variables and are never shown)
+- **Settings** — workspace, execution limits, permission policy, theme
+
+The UI is a dependency-free single-page app (`nextclaw/web/`) backed by a
+JSON API (`nextclaw/server.py`, stdlib only) with Bearer-token auth,
+per-IP rate limits, and Server-Sent Events for live task updates.
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) before exposing it beyond
+localhost.
+
 ## Quickstart: a verified agent run
 
 No API key needed — the deterministic planner runs fully offline:
@@ -109,9 +135,12 @@ flowchart LR
 
 - **Planning** — `run` uses an explicit deterministic planner; `run-agent`
   lets the model plan in its own words via function calling.
-- **Tools** — 7 built-ins: `fs.list`, `fs.read`, `fs.write`, `fs.hash`,
-  `fs.measure`, `verify.file_report`, `exec.run`. All run through one
-  permission policy.
+- **Tools** — 9 built-ins: `fs.list`, `fs.read`, `fs.write`, `fs.hash`,
+  `fs.measure`, `browser.fetch`, `verify.file_report`, `verify.file_write`,
+  `exec.run`. All run through one permission policy.
+- **Deterministic task types** — `file_report`, `file_write`,
+  `browser_research` (each with explicit success criteria and verifiers),
+  plus open-ended `run-agent` goals with a configured model.
 - **Verification** — verifiers recompute results independently. A wrong report
   fails the task with a diagnosis; the model can read the error and try again.
 - **Checkpoints** — task state, steps, and conversation turns persist after
@@ -146,13 +175,19 @@ nextclaw/
     agent_llm.py    # live-model tool-calling loop
     llm.py          # provider abstraction (Gemini, Ollama) + quota budgets
     tools.py        # tool registry, permissions, sandbox, secret redaction
-    tasks.py        # SQLite task queue + step state machine + turns
+    browsertools.py # SSRF-guarded web fetching (read-only research)
+    approvals.py    # human approval gate + audit log
+    channels.py     # Telegram channel (opt-in, mock-tested)
+    server.py       # dashboard API + static server (stdlib only)
+    web/            # dashboard SPA (index.html, styles.css, app.js)
+    tasks.py        # SQLite task queue + step state machine + turns + events
     memory.py       # structured long-term memory with provenance
     scheduler.py    # persistent 40-min dev-cycle scheduler
     bench.py        # reproducible benchmark suite
     cli.py          # command-line interface
     cycle.py        # autonomous dev-cycle runner
-  tests/            # 44 tests, all offline (live test env-gated)
+  tests/            # 85 tests, all offline (live test env-gated)
+  docs/             # deployment guide
   examples/demo.py  # self-contained end-to-end demo (temp dirs only)
   assets/           # logo, banner, social preview (SVG)
   .github/          # CI, issue/PR templates
@@ -180,7 +215,7 @@ real keys).
 ## Testing
 
 ```bash
-python3 -m unittest discover -s tests          # full suite, offline
+python3 -m unittest discover -s tests          # full suite (85 tests), offline
 NEXTCLAW_LIVE_TESTS=1 python3 -m unittest tests.test_llm_live   # needs API key
 python3 examples/demo.py                        # end-to-end demo in temp dirs
 python3 -m nextclaw.cli bench                   # benchmark suite
@@ -195,9 +230,10 @@ default so CI and contributors never burn quota.
 |---|---|
 | `Gemini provider needs NEXTCLAW_GEMINI_API_KEY` | export the key, or use offline `run` |
 | `quota cooldown active` | free-tier quota exhausted; wait or raise `llm_quota_cooldown_s` |
-| `approval required for tool 'exec.run'` | resume with `--approve exec.run` after reviewing |
+| `approval required for tool 'exec.run'` | resume with `--approve exec.run` after reviewing, or approve in the dashboard |
 | `path escapes workspace root` | tools are confined to `NEXTCLAW_WORKSPACE` by design |
 | `did not finish within 12 turns` | raise `max_turns`, or simplify the goal |
+| dashboard asks for a token | paste the token printed by `nextclaw serve` (or set `NEXTCLAW_API_TOKEN`) |
 
 ## Security
 
@@ -207,6 +243,18 @@ default so CI and contributors never burn quota.
 - `exec.run` never uses a shell, is denylisted for destructive patterns, is
   confined to the workspace, and requires explicit human approval.
 - Unconfigured providers fail closed with a clear error.
+- The dashboard API requires a Bearer token; keys are never exposed by any
+  endpoint; browser fetching is SSRF-guarded. See
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+## Messaging
+
+An opt-in Telegram channel (`python3 -m nextclaw.cli channels telegram`)
+maps messages to tasks: `/task <goal>`, `/status`, `/tasks`, `/cancel`.
+Access is restricted to `NEXTCLAW_TELEGRAM_ALLOWED_IDS`, update offsets
+persist (no duplicate tasks on restart), and approvals are never granted
+from chat — they require the dashboard or CLI. Token via
+`NEXTCLAW_TELEGRAM_BOT_TOKEN`. Any pre-existing bot is untouched.
 
 ## Roadmap
 
@@ -214,9 +262,12 @@ default so CI and contributors never burn quota.
 - [x] Live-model tool-calling loop (Gemini; Ollama implemented)
 - [x] Persistent 40-minute scheduler
 - [x] Quota budgets and cooldowns
-- [ ] Browser automation (allowlisted domains)
-- [ ] Web dashboard / Telegram interface
+- [x] Web dashboard + API + human approvals
+- [x] Task cancellation and audit log
+- [x] Browser research (fetch-only; interactive browsing needs headless Chromium)
+- [x] Telegram channel (opt-in)
 - [ ] Multi-agent delegation
+- [ ] Cost/token accounting per task
 - [ ] Head-to-head benchmark vs alternatives
 
 See [ROADMAP.md](ROADMAP.md) for detail.

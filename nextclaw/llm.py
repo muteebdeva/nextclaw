@@ -109,6 +109,22 @@ PARAM_SPECS: Dict[str, Dict[str, Any]] = {
         },
         "required": ["report_path"],
     },
+    "verify.file_write": {
+        "description": "Recompute a file's sha256 and verify it matches the expected digest.",
+        "properties": {
+            "path": {"type": "string", "description": "Workspace-relative file path"},
+            "sha256": {"type": "string", "description": "Expected hex digest"},
+        },
+        "required": ["path", "sha256"],
+    },
+    "browser.fetch": {
+        "description": "Fetch a web page (read-only) and return title, text, and links.",
+        "properties": {
+            "url": {"type": "string", "description": "http(s) URL to fetch"},
+            "max_chars": {"type": "string", "description": "Max text chars to return"},
+        },
+        "required": ["url"],
+    },
     "exec.run": {
         "description": "HIGH-RISK: run a command without a shell, confined to the workspace. Requires explicit human approval.",
         "properties": {
@@ -320,7 +336,7 @@ class OllamaProvider(LLMProvider):
         self.base_url = base_url or os.environ.get("NEXTCLAW_OLLAMA_URL", "http://127.0.0.1:11434")
         self.model = model or os.environ.get("NEXTCLAW_OLLAMA_MODEL", "")
         if not self.model:
-            raise NotConfigured("Ollama provider needs NEXTCLAW_OLLAMA_MODEL in the environment.")
+            raise NotConfigured("Ollama provider needs a model: set NEXTCLAW_OLLAMA_MODEL or ollama_model.")
 
     def chat(self, system, history, declarations, timeout_s=120) -> LLMResponse:
         import urllib.error as _e  # local import keeps module importable without ollama
@@ -377,7 +393,8 @@ def llm_provider(cfg) -> LLMProvider:
     if name == "gemini":
         return GeminiProvider(model=getattr(cfg, "llm_model", "gemini-3.7-flash"))
     if name == "ollama":
-        return OllamaProvider(model=getattr(cfg, "llm_model", "") or None)
+        return OllamaProvider(base_url=getattr(cfg, "ollama_url", "") or None,
+                              model=getattr(cfg, "ollama_model", "") or None)
     raise ProviderError(f"unknown llm_provider '{name}'")
 
 
@@ -435,6 +452,34 @@ class RequestBudget:
                     f"daily API budget exhausted ({row[0]}/{max_day}); not calling the API")
         finally:
             conn.close()
+
+    def status(self, cfg) -> dict:
+        """Read-only snapshot for the dashboard (never raises)."""
+        import sqlite3 as _sql
+
+        max_day = int(getattr(cfg, "llm_max_requests_per_day", 200))
+        cooldown_s = float(getattr(cfg, "llm_quota_cooldown_s", 3600))
+        out = {"daily_used": 0, "daily_cap": max_day,
+               "cooldown_active": False, "cooldown_left_s": 0}
+        try:
+            conn = _sql.connect(self.path)
+            try:
+                row = conn.execute(
+                    "SELECT count FROM daily WHERE day=?", (self._day(),)).fetchone()
+                if row:
+                    out["daily_used"] = int(row[0])
+                row = conn.execute(
+                    "SELECT v FROM state WHERE k='quota_exhausted_at'").fetchone()
+                if row:
+                    left = cooldown_s - (time.time() - float(row[0]))
+                    if left > 0:
+                        out["cooldown_active"] = True
+                        out["cooldown_left_s"] = int(left)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        return out
 
     def record(self, quota_exhausted: bool = False) -> None:
         import sqlite3 as _sql

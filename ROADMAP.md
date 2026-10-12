@@ -19,8 +19,18 @@
 - [ ] Scheduler (cron-like) with persistent due tasks
 - [ ] Event triggers (file watcher) with persistent cursor
 - [ ] Multi-agent delegation (parent/child tasks)
-- [ ] Web dashboard (read-only task/memory views)
-- [ ] Telegram adapter behind explicit pairing + approvals
-- [ ] Browser automation tool behind allowlisted domains
+- [x] Web dashboard with real task management, execution visibility, provider
+      status, and user controls (`nextclaw serve` — stdlib API + vanilla JS SPA,
+      Bearer auth, SSE live updates)
+- [x] Human approval queue + audit log (dashboard/API/CLI; gate blocks agent
+      until decided; denials fail closed)
+- [x] Task cancellation (cooperative, checkpoint-safe) via dashboard/API/CLI
+- [x] Telegram channel behind explicit allowlist + approvals
+      (`nextclaw channels telegram`; mock-tested, opt-in)
+- [x] Browser research tool (`browser.fetch`: read-only, SSRF-guarded,
+      tested). Interactive browsing (click/forms/screenshots) still needs a
+      working headless Chromium — not available in this environment.
+- [x] Deterministic task types beyond file_report: `file_write`,
+      `browser_research` (explicit plans + verifiers)
 - [ ] Cost/token accounting per task and provider
 - [ ] Head-to-head benchmark harness vs OpenClaw on equivalent tasks

@@ -293,6 +293,53 @@ def _verify_file_report(args: Dict[str, Any], cfg) -> Any:
 
 
 @tool(
+    "verify.file_write",
+    "Recompute a file's sha256 and verify it matches the expected digest.",
+    risk="low",
+)
+def _verify_file_write(args: Dict[str, Any], cfg) -> Any:
+    import hashlib
+
+    expected = str(args.get("sha256", "")).lower()
+    if not expected:
+        raise ToolError("verify.file_write needs 'sha256'")
+    real = resolve_within_root(cfg.workspace_root, str(args["path"]))
+    if not os.path.isfile(real):
+        raise ToolError(f"file not found: {args['path']!r}")
+    h = hashlib.sha256()
+    with open(real, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    actual = h.hexdigest()
+    ok = actual == expected
+    return {
+        "ok": ok,
+        "path": relative_to_root(cfg.workspace_root, real),
+        "expected_sha256": expected,
+        "actual_sha256": actual,
+        "detail": "written bytes match expected digest" if ok else "DIGEST MISMATCH",
+    }
+
+
+@tool(
+    "browser.fetch",
+    "Fetch a web page (read-only) and return title, text, and links. SSRF-guarded.",
+    risk="medium",
+)
+def _browser_fetch(args: Dict[str, Any], cfg) -> Any:
+    from .browsertools import BrowserError, fetch_url
+
+    url = str(args.get("url", "")).strip()
+    if not url:
+        raise ToolError("browser.fetch needs 'url'")
+    max_chars = int(args.get("max_chars", 20000))
+    try:
+        return fetch_url(url, max_chars=max(1000, min(max_chars, 100000)))
+    except BrowserError as exc:
+        raise ToolError(str(exc))
+
+
+@tool(
     "exec.run",
     "Run a command without a shell, confined to the workspace (high-risk).",
     risk="high",

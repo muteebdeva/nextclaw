@@ -10,6 +10,7 @@ Reliability rules (MVP):
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, Tuple
 
 from . import models, tools
@@ -45,6 +46,31 @@ def render_file_report(
     return "\n".join(lines) + "\n"
 
 
+def render_research_report(
+    goal: str, params: Dict[str, Any], fetch: Dict[str, Any]
+) -> str:
+    lines = [
+        "# Research report",
+        "",
+        f"Goal: {goal}",
+        f"Source URL: {fetch.get('final_url') or params.get('url', '')}",
+        f"Page title: {fetch.get('title', '')}",
+        "",
+        "## Extracted text",
+        "",
+        (fetch.get("text") or "(no text extracted)")[:12000],
+        "",
+        "## Links",
+    ]
+    links = fetch.get("links") or []
+    if links:
+        for link in links[:30]:
+            lines.append(f"- [{link.get('text', '')}]({link.get('href', '')})")
+    else:
+        lines.append("(no links found)")
+    lines += ["", "Fetched and verified by NextClaw."]
+    return "\n".join(lines) + "\n"
+
 def _substitute(args: Dict[str, Any], context: Dict[str, Any], goal: str, params: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for k, v in args.items():
@@ -52,6 +78,13 @@ def _substitute(args: Dict[str, Any], context: Dict[str, Any], goal: str, params
             files = context.get("collect_files") or []
             measure = context.get("measure_files") or {}
             out[k] = render_file_report(goal, params, files, measure)
+        elif isinstance(v, str) and v in ("{{research_report}}", "{{research_report_sha256}}"):
+            fetch = context.get("fetch_page") or {}
+            report = render_research_report(goal, params, fetch)
+            if v == "{{research_report_sha256}}":
+                out[k] = hashlib.sha256(report.encode("utf-8")).hexdigest()
+            else:
+                out[k] = report
         else:
             out[k] = v
     return out
@@ -88,6 +121,11 @@ def _verify_step(step: Dict[str, Any], result: Dict[str, Any], context: Dict[str
             detail = output.get("detail") if isinstance(output, dict) else result.get("error")
             raise VerificationFailed(f"report verification failed: {detail}")
         return
+    if kind == "fetch_ok":
+        if not (result.get("ok") and isinstance(output, dict) and output.get("final_url")
+                and isinstance(output.get("text"), str)):
+            raise VerificationFailed("browser.fetch did not return usable page content")
+        return
     raise VerificationFailed(f"unknown verify kind '{kind}'")
 
 
@@ -106,19 +144,27 @@ def run_task(
     cfg: Config,
     approvals: Tuple[str, ...] = (),
     fail_after_step: int | None = None,
+    approver=None,
 ) -> Dict[str, Any]:
-    """Execute (or resume) a task. Returns the final task record."""
+    """Execute (or resume) a task. Returns the final task record.
+
+    ``approver`` is an optional callable ``(task_id, tool, args, reason) -> bool``.
+    When a tool requires approval, the approver is consulted: True grants the
+    action for this call, False denies it. Without an approver the task parks
+    in ``awaiting_approval`` (CLI resume flow).
+    """
     ensure_data_dir(cfg)
     store = TaskStore(cfg.data_dir)
     task = store.get_task(task_id)
     if task is None:
         raise ValueError(f"unknown task '{task_id}'")
-    if task["status"] in ("completed", "failed"):
+    if task["status"] in ("completed", "failed", "cancelled"):
         return task
 
     # Crash recovery: orphaned running steps become pending again.
     store.reset_running_steps(task_id)
     store.set_task_status(task_id, "running")
+    store.add_event(task_id, "status", {"status": "running"})
     task = store.get_task(task_id)
     params = task["params"]
     goal = task["goal"]
@@ -132,14 +178,25 @@ def run_task(
     for step in steps:
         if step["status"] == "done":
             continue
+        if store.cancel_requested(task_id):
+            store.set_task_status(task_id, "cancelled", error="cancelled by user")
+            store.add_event(task_id, "status", {"status": "cancelled"})
+            return store.get_task(task_id)
         attempts = step["attempts"] or 0
         last_error = step.get("error") or ""
         while attempts < cfg.max_step_attempts:
             attempts += 1
             store.update_step(step["id"], status="running", attempts=attempts)
+            store.add_event(task_id, "step", {"step": step["name"], "tool": step["tool"], "status": "running"})
             try:
                 args = _substitute(step["args"], context, goal, params)
-                res = tools.execute(step["tool"], args, cfg, approvals)
+                try:
+                    res = tools.execute(step["tool"], args, cfg, approvals)
+                except tools.ApprovalRequired as exc:
+                    if approver is not None and approver(task_id, step["tool"], args, str(exc)):
+                        res = tools.execute(step["tool"], args, cfg, approvals + (step["tool"],))
+                    else:
+                        raise
                 res_dict = {
                     "ok": res.ok,
                     "output": res.output,
@@ -150,10 +207,17 @@ def run_task(
                     raise VerificationFailed(f"tool error: {res.error}")
                 _verify_step(step, res_dict, context, cfg)
                 store.update_step(step["id"], status="done", result=res_dict, error="")
+                store.add_event(task_id, "step", {"step": step["name"], "tool": step["tool"], "status": "done"})
                 context[step["name"]] = res.output
                 last_error = ""
                 break
             except tools.ApprovalRequired as exc:
+                if approver is not None:
+                    # Approver explicitly denied (or timed out): fail, don't park.
+                    store.update_step(step["id"], status="failed", error=f"approval denied: {exc}")
+                    store.set_task_status(task_id, "failed", error=f"approval denied for '{step['tool']}': {exc}")
+                    store.add_event(task_id, "status", {"status": "failed", "reason": "approval denied"})
+                    return store.get_task(task_id)
                 store.update_step(step["id"], status="awaiting_approval", error=str(exc))
                 store.set_task_status(task_id, "awaiting_approval", error=str(exc))
                 return store.get_task(task_id)
@@ -179,6 +243,7 @@ def run_task(
 
     result = _build_result(task_id, cfg, context, params)
     store.set_task_status(task_id, "completed", result=result)
+    store.add_event(task_id, "status", {"status": "completed"})
     _remember_completion(cfg, task, result)
     return store.get_task(task_id)
 
@@ -190,13 +255,26 @@ def _build_result(
         report_path = params.get("output", "")
         h = tools.execute("fs.hash", {"path": report_path}, cfg)
         measure = context.get("measure_files", {})
-        return {
+        result = {
             "task_id": task_id,
             "report_path": report_path,
             "sha256": h.output.get("digest") if h.ok else "",
-            "total_files": measure.get("total_files"),
-            "total_lines": measure.get("total_lines"),
-            "total_bytes": measure.get("total_bytes"),
+            "verified": True,
+        }
+        if measure:
+            result.update({
+                "total_files": measure.get("total_files"),
+                "total_lines": measure.get("total_lines"),
+                "total_bytes": measure.get("total_bytes"),
+            })
+        return result
+    if "verify_write" in context:
+        path = params.get("path", "")
+        h = tools.execute("fs.hash", {"path": path}, cfg)
+        return {
+            "task_id": task_id,
+            "path": path,
+            "sha256": h.output.get("digest") if h.ok else "",
             "verified": True,
         }
     return {"task_id": task_id, "verified": False}

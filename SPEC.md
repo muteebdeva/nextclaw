@@ -45,6 +45,14 @@ Explicitly out of scope for the MVP: messaging channels, browser automation,
 scheduler/event triggers, multi-agent orchestration, web dashboard, cost
 accounting. These are roadmap items.
 
+**Status update (2026-10-12):** the dashboard milestone delivered the web
+dashboard + JSON API (`nextclaw serve`), a human approval gate with audit
+log, task cancellation, deterministic `file_write` and `browser_research`
+task types, read-only browser research (`browser.fetch`, SSRF-guarded), an
+opt-in Telegram channel, and scheduler visibility in the dashboard/API.
+Still out of scope: interactive browser automation (click/forms/screenshots),
+multi-agent orchestration, cost accounting. See LIMITATIONS.md.
+
 ## 4. Measurable benchmarks
 
 - End-to-end task success rate (target: 100% on the MVP task family).

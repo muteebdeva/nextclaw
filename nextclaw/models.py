@@ -7,6 +7,7 @@ they fail closed with a clear error instead of pretending to work.
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, List
 
 
@@ -60,6 +61,49 @@ class StubProvider:
                     "name": "verify_report",
                     "tool": "verify.file_report",
                     "args": {"report_path": output, "root": root, "pattern": pattern},
+                    "verify": {"kind": "verify_ok"},
+                },
+            ]
+        if task_type == "file_write":
+            for key in ("path", "content"):
+                if key not in params:
+                    raise UnsupportedTask(f"file_write needs param '{key}'")
+            digest = hashlib.sha256(str(params["content"]).encode("utf-8")).hexdigest()
+            return [
+                {
+                    "name": "write_file",
+                    "tool": "fs.write",
+                    "args": {"path": params["path"], "content": params["content"]},
+                    "verify": {"kind": "file_exists", "path": params["path"]},
+                },
+                {
+                    "name": "verify_write",
+                    "tool": "verify.file_write",
+                    "args": {"path": params["path"], "sha256": digest},
+                    "verify": {"kind": "verify_ok"},
+                },
+            ]
+        if task_type == "browser_research":
+            for key in ("url", "output"):
+                if key not in params:
+                    raise UnsupportedTask(f"browser_research needs param '{key}'")
+            return [
+                {
+                    "name": "fetch_page",
+                    "tool": "browser.fetch",
+                    "args": {"url": params["url"]},
+                    "verify": {"kind": "fetch_ok"},
+                },
+                {
+                    "name": "write_report",
+                    "tool": "fs.write",
+                    "args": {"path": params["output"], "content": "{{research_report}}"},
+                    "verify": {"kind": "file_exists", "path": params["output"]},
+                },
+                {
+                    "name": "verify_report",
+                    "tool": "verify.file_write",
+                    "args": {"path": params["output"], "sha256": "{{research_report_sha256}}"},
                     "verify": {"kind": "verify_ok"},
                 },
             ]

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NextClaw Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Crect width='256' height='256' rx='58' fill='%230B0E14'/%3E%3Cpath d='M70 48 L100 48 L78 208 L48 208 Z' fill='%232E5BFF'/%3E%3Cpath d='M124 48 L154 48 L132 208 L102 208 Z' fill='%232E5BFF' opacity='.85'/%3E%3Cpath d='M178 48 L208 48 L186 208 L156 208 Z' fill='%232E5BFF' opacity='.7'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="unlock" class="unlock hidden">
+  <div class="unlock-card">
+    <div class="brand">
+      <svg class="claw" viewBox="0 0 256 256" aria-hidden="true"><path d="M70 48 L100 48 L78 208 L48 208 Z" fill="#2E5BFF"/><path d="M124 48 L154 48 L132 208 L102 208 Z" fill="#2E5BFF" opacity=".85"/><path d="M178 48 L208 48 L186 208 L156 208 Z" fill="#2E5BFF" opacity=".7"/></svg>
+      <span>NextClaw</span>
+    </div>
+    <h1>Connect to your agent server</h1>
+    <p>Paste the API token printed when you started <code>nextclaw serve</code>.
+       It is stored only in this browser's local storage.</p>
+    <label class="field">
+      <span>API token</span>
+      <input id="token-input" type="password" autocomplete="off" placeholder="paste token here">
+    </label>
+    <div id="unlock-error" class="error hidden"></div>
+    <button id="unlock-btn" class="btn primary">Connect</button>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <aside class="sidebar">
+    <div class="brand">
+      <svg class="claw" viewBox="0 0 256 256" aria-hidden="true"><path d="M70 48 L100 48 L78 208 L48 208 Z" fill="#2E5BFF"/><path d="M124 48 L154 48 L132 208 L102 208 Z" fill="#2E5BFF" opacity=".85"/><path d="M178 48 L208 48 L186 208 L156 208 Z" fill="#2E5BFF" opacity=".7"/></svg>
+      <span>NextClaw</span>
+    </div>
+    <nav aria-label="Main">
+      <a href="#/overview" data-nav="overview">Overview</a>
+      <a href="#/tasks" data-nav="tasks">Tasks</a>
+      <a href="#/approvals" data-nav="approvals">Approvals <span id="nav-approval-badge" class="badge hidden"></span></a>
+      <a href="#/scheduler" data-nav="scheduler">Scheduler</a>
+      <a href="#/providers" data-nav="providers">Providers</a>
+      <a href="#/settings" data-nav="settings">Settings</a>
+    </nav>
+    <div class="sidebar-foot">
+      <button id="theme-toggle" class="btn ghost" aria-label="Toggle theme">Theme</button>
+      <button id="lock-btn" class="btn ghost" aria-label="Lock dashboard">Lock</button>
+    </div>
+  </aside>
+  <main id="view" tabindex="-1"></main>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+<div id="modal-root"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

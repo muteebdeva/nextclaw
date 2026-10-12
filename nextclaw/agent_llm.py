@@ -85,6 +85,7 @@ def run_llm_task(
     approvals: Tuple[str, ...] = (),
     provider: llm_mod.LLMProvider | None = None,
     fail_after_turn: int | None = None,
+    approver=None,
 ) -> Dict[str, Any]:
     """Execute (or resume) an LLM-driven task. Returns the final task record."""
     ensure_data_dir(cfg)
@@ -94,10 +95,11 @@ def run_llm_task(
         raise ValueError(f"unknown task '{task_id}'")
     if task["task_type"] != "agent":
         raise ValueError(f"task '{task_id}' is not an LLM agent task")
-    if task["status"] in ("completed", "failed"):
+    if task["status"] in ("completed", "failed", "cancelled"):
         return task  # never re-execute a finished task
 
     store.set_task_status(task_id, "running")
+    store.add_event(task_id, "status", {"status": "running"})
     task = store.get_task(task_id)
     params = task["params"]
 
@@ -116,6 +118,8 @@ def run_llm_task(
     max_task_requests = int(getattr(cfg, "llm_max_requests_per_task", 40))
 
     for _ in range(cfg.max_turns):
+        if store.cancel_requested(task_id):
+            return _finish(task_id, store, cfg, "cancelled", error="cancelled by user")
         if time.time() > deadline:
             return _finish(task_id, store, cfg, "failed", error="task deadline exceeded")
         if store.count_turns(task_id, role="assistant") >= max_task_requests:
@@ -153,9 +157,12 @@ def run_llm_task(
             return _verify_and_finish(task_id, store, cfg, params, resp.text)
 
         for tc in resp.tool_calls:
-            outcome, output = _execute_tool_call(task_id, store, cfg, tc, approvals, turn_index)
+            outcome, output = _execute_tool_call(task_id, store, cfg, tc, approvals, turn_index, approver)
             if outcome == "awaiting_approval":
                 return store.get_task(task_id)
+            if outcome == "denied":
+                return _finish(task_id, store, cfg, "failed",
+                               error=f"approval denied for '{tc.name}'")
             # Explicit success criteria: if the task's verifier tool reports
             # ok:true with matching args, the goal is achieved - stop now
             # instead of letting the model second-guess a verified result.
@@ -192,18 +199,25 @@ def _chat_with_retry(provider, system, history, declarations, cfg, retries: int 
     raise llm_mod.ProviderError("unreachable")
 
 
-def _execute_tool_call(task_id, store, cfg, tc: llm_mod.ToolCall, approvals, turn_index):
+def _execute_tool_call(task_id, store, cfg, tc: llm_mod.ToolCall, approvals, turn_index, approver=None):
     """Permission-check, execute, checkpoint.
 
-    Returns (status, output): status is 'ok' or 'awaiting_approval'.
+    Returns (status, output): 'ok', 'awaiting_approval' (no approver wired),
+    or 'denied' (approver refused).
     """
     step_name = f"turn{turn_index}:{tc.name}"
     try:
         tools.check_permission(tc.name, tc.args, cfg, approvals)
     except tools.ApprovalRequired as exc:
-        store.add_turn(task_id, "tool", {"name": tc.name, "output": {"error": str(exc)}})
-        store.set_task_status(task_id, "awaiting_approval", error=str(exc))
-        return "awaiting_approval", {"error": str(exc)}
+        if approver is not None and approver(task_id, tc.name, tc.args, str(exc)):
+            approvals = approvals + (tc.name,)
+        elif approver is not None:
+            store.add_turn(task_id, "tool", {"name": tc.name, "output": {"error": "approval denied by user"}})
+            return "denied", {"error": "approval denied by user"}
+        else:
+            store.add_turn(task_id, "tool", {"name": tc.name, "output": {"error": str(exc)}})
+            store.set_task_status(task_id, "awaiting_approval", error=str(exc))
+            return "awaiting_approval", {"error": str(exc)}
     except tools.ToolError as exc:
         # Denied by policy: tell the model so it can adjust, don't crash.
         denied = {"error": f"denied: {exc}"}

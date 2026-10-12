@@ -2,6 +2,33 @@
 
 All notable changes to NextClaw. Dates are in IST (Asia/Kolkata).
 
+## Unreleased — dashboard milestone
+
+- **Web dashboard** (`nextclaw serve`): dependency-free SPA + stdlib JSON API
+  with Bearer-token auth, live task updates over SSE, and per-IP rate limits.
+  Pages: Overview, Tasks (+ detail timeline, tool-call inspection, verification
+  evidence), Approvals, Scheduler, Providers, Settings. Dark/light themes.
+- **Human approval gate** (`nextclaw/approvals.py`): SQLite approval queue;
+  the agent blocks until a human approves/rejects via dashboard, API, or CLI;
+  every decision is audit-logged. Denials and timeouts fail closed.
+- **Task cancellation**: cooperative cancel between steps/turns via
+  dashboard, API, or `nextclaw cancel`; pending approvals are denied on cancel.
+- **New deterministic task types**: `file_write` (sha256-verified) and
+  `browser_research` (fetch → report → verified).
+- **Browser research** (`browser.fetch`): read-only page fetch with SSRF
+  protection (blocks private/loopback/link-local/metadata IPs, validates
+  redirect targets), timeouts, and size caps. Tested against a local server.
+- **Telegram channel** (`nextclaw channels telegram`): opt-in, allowlisted
+  users only, persistent update offsets, mock-tested. Never auto-approves.
+- **Scheduler in dashboard/API**: jobs, run history, enable/disable/run-now.
+- **API additions**: health, status, tasks CRUD, approvals, policy, providers
+  (+ connectivity test, safe config updates), quota, audit, memory, SSE.
+- `run-agent`/`run` now fail gracefully (no traceback) on unconfigured
+  providers; `OllamaProvider` reads `ollama_url`/`ollama_model` from config.
+- Test suite: 85 tests (was 45), all offline; pyflakes clean.
+- Docs: `LIMITATIONS.md` (honest capability inventory), `docs/DEPLOYMENT.md`
+  (safe exposure checklist), README/ROADMAP updated.
+
 ## Unreleased
 
 - Repository launch polish: redesigned README, SVG visual identity

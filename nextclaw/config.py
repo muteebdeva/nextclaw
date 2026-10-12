@@ -23,19 +23,24 @@ def _default_workspace() -> str:
     )
 
 
+DEFAULT_ALLOWED_TOOLS = (
+    "fs.list",
+    "fs.read",
+    "fs.write",
+    "fs.hash",
+    "fs.measure",
+    "verify.file_report",
+    "verify.file_write",
+    "browser.fetch",
+    "exec.run",
+)
+
+
 @dataclass
 class Config:
     data_dir: str = field(default_factory=_default_data_dir)
     workspace_root: str = field(default_factory=_default_workspace)
-    allowed_tools: tuple = (
-        "fs.list",
-        "fs.read",
-        "fs.write",
-        "fs.hash",
-        "fs.measure",
-        "verify.file_report",
-        "exec.run",
-    )
+    allowed_tools: tuple = DEFAULT_ALLOWED_TOOLS
     max_step_attempts: int = 3
     step_timeout_s: int = 30
     model_provider: str = "stub"
@@ -45,6 +50,8 @@ class Config:
     llm_provider: str = "gemini"
     llm_model: str = "gemini-3.7-flash"
     llm_timeout_s: int = 60
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = ""
     max_turns: int = 12
     task_timeout_s: int = 600
     # Scheduler settings
@@ -71,18 +78,7 @@ def load_config(path: str | None = None, overrides: dict | None = None) -> Confi
         data_dir=data.get("data_dir", _default_data_dir()),
         workspace_root=data.get("workspace_root", _default_workspace()),
         allowed_tools=tuple(
-            data.get(
-                "allowed_tools",
-                (
-                    "fs.list",
-                    "fs.read",
-                    "fs.write",
-                    "fs.hash",
-                    "fs.measure",
-                    "verify.file_report",
-                    "exec.run",
-                ),
-            )
+            data.get("allowed_tools", DEFAULT_ALLOWED_TOOLS)
         ),
         max_step_attempts=int(data.get("max_step_attempts", 3)),
         step_timeout_s=int(data.get("step_timeout_s", 30)),
@@ -91,6 +87,8 @@ def load_config(path: str | None = None, overrides: dict | None = None) -> Confi
         llm_provider=os.environ.get("NEXTCLAW_LLM_PROVIDER", data.get("llm_provider", "gemini")),
         llm_model=os.environ.get("NEXTCLAW_LLM_MODEL", data.get("llm_model", "gemini-3.7-flash")),
         llm_timeout_s=int(os.environ.get("NEXTCLAW_LLM_TIMEOUT_S", data.get("llm_timeout_s", 60))),
+        ollama_url=os.environ.get("NEXTCLAW_OLLAMA_URL", data.get("ollama_url", "http://127.0.0.1:11434")),
+        ollama_model=os.environ.get("NEXTCLAW_OLLAMA_MODEL", data.get("ollama_model", "")),
         max_turns=int(data.get("max_turns", 12)),
         task_timeout_s=int(data.get("task_timeout_s", 600)),
         scheduler_tick_s=int(data.get("scheduler_tick_s", 30)),

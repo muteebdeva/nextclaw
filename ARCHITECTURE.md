@@ -54,7 +54,22 @@
 - `bench.py` - reproducible benchmark suite (runs the real code).
 - `cycle.py` - autonomous dev cycle: runs tests, records state, picks next
   roadmap item.
-- `cli.py` - user interface.
+- `approvals.py` - human approval gate: SQLite approval queue + audit log.
+  `ApprovalGate` blocks the agent until a human approves/rejects (dashboard,
+  API, or CLI); denials and timeouts fail closed. Pre-approved tools via
+  `preapproved_approver` (CLI `--approve`).
+- `server.py` - dashboard API + static file server (stdlib only):
+  Bearer-token auth, per-IP rate limits, background task runner
+  (ThreadPoolExecutor), SSE task-event streams, endpoints for tasks,
+  approvals, policy, providers, scheduler, quota, audit, memory.
+- `browsertools.py` - read-only web research: SSRF-guarded fetch (blocks
+  private/loopback/link-local/metadata IPs, validates redirect targets),
+  HTML text/link extraction. No JS execution.
+- `channels.py` - Telegram channel (opt-in): long-polling client with
+  injectable transport, allowlisted users, persistent update offsets,
+  `/task` `/status` `/tasks` `/cancel` commands. Never auto-approves.
+- `cli.py` - user interface (`serve`, `cancel`, `channels telegram` added).
+- `web/` - dependency-free dashboard SPA (dark/light themes).
 
 ## Data flow (file_report)
 

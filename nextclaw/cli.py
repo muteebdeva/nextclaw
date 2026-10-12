@@ -51,11 +51,13 @@ def cmd_init(cfg: Config) -> int:
 
 
 def cmd_run(args, cfg: Config) -> int:
+    from .approvals import preapproved_approver
     params = _parse_params(args.param)
     task_id = agent.create_task(args.goal, args.type, params, cfg)
     print(f"task: {task_id}")
+    approver = preapproved_approver(args.approve) if args.approve else None
     try:
-        task = agent.run_task(task_id, cfg, approvals=tuple(args.approve or ()))
+        task = agent.run_task(task_id, cfg, approvals=tuple(args.approve or ()), approver=approver)
     except RuntimeError as exc:
         print(f"interrupted: {exc}")
         print(f"resume with: python3 -m nextclaw.cli resume --task-id {task_id}")
@@ -76,13 +78,15 @@ def cmd_run(args, cfg: Config) -> int:
 def cmd_resume(args, cfg: Config) -> int:
     from . import agent_llm
     from .tasks import TaskStore as _TS
+    from .approvals import preapproved_approver
 
     ensure_data_dir(cfg)
+    approver = preapproved_approver(args.approve) if args.approve else None
     task = _TS(cfg.data_dir).get_task(args.task_id)
     if task and task["task_type"] == "agent":
-        runner = lambda: agent_llm.run_llm_task(args.task_id, cfg, approvals=tuple(args.approve or ()))
+        runner = lambda: agent_llm.run_llm_task(args.task_id, cfg, approvals=tuple(args.approve or ()), approver=approver)
     else:
-        runner = lambda: agent.run_task(args.task_id, cfg, approvals=tuple(args.approve or ()))
+        runner = lambda: agent.run_task(args.task_id, cfg, approvals=tuple(args.approve or ()), approver=approver)
     try:
         task = runner()
     except RuntimeError as exc:
@@ -212,14 +216,16 @@ def cmd_scheduler(args, cfg: Config) -> int:
 
 def cmd_run_agent(args, cfg: Config) -> int:
     from . import agent_llm
+    from .approvals import preapproved_approver
 
     verify = None
     if args.verify_tool:
         verify = {"tool": args.verify_tool, "args": _parse_params(args.verify_arg)}
     task_id = agent_llm.create_agent_task(args.goal, cfg, verify=verify)
     print(f"task: {task_id} (llm provider: {cfg.llm_provider}/{cfg.llm_model})")
+    approver = preapproved_approver(args.approve) if args.approve else None
     try:
-        task = agent_llm.run_llm_task(task_id, cfg, approvals=tuple(args.approve or ()))
+        task = agent_llm.run_llm_task(task_id, cfg, approvals=tuple(args.approve or ()), approver=approver)
     except RuntimeError as exc:
         print(f"interrupted: {exc}")
         print(f"resume with: python3 -m nextclaw.cli resume --task-id {task_id}")
@@ -235,6 +241,39 @@ def cmd_run_agent(args, cfg: Config) -> int:
     print("result:")
     print(json.dumps(task["result"], indent=2))
     return 0
+
+
+def cmd_cancel(args, cfg: Config) -> int:
+    from .approvals import ApprovalStore
+    ensure_data_dir(cfg)
+    store = TaskStore(cfg.data_dir)
+    task = store.get_task(args.task_id)
+    if not task:
+        print(f"unknown task {args.task_id}")
+        return 1
+    if task["status"] in ("completed", "failed", "cancelled"):
+        print(f"task {args.task_id} already {task['status']}")
+        return 0
+    store.request_cancel(args.task_id)
+    # Deny any pending approvals so a blocked runner wakes promptly.
+    ap = ApprovalStore(cfg.data_dir)
+    for rec in ap.pending_for_task(args.task_id):
+        ap.decide(rec["id"], "rejected", decided_by="system-cancel")
+    ap.audit("user", "task.cancel", args.task_id, {})
+    print(f"cancel requested for task {args.task_id}")
+    return 0
+
+
+def cmd_serve(args, cfg: Config) -> int:
+    from .server import serve
+    return serve(cfg, host=args.host, port=args.port)
+
+
+def cmd_channels(args, cfg: Config) -> int:
+    if args.channel_action == "telegram":
+        from .channels import run_telegram
+        return run_telegram(cfg)
+    raise SystemExit(f"unknown channel {args.channel_action!r}")
 
 
 def main(argv=None) -> int:
@@ -264,6 +303,16 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("status")
     p.add_argument("--task-id", required=True)
+
+    p = sub.add_parser("cancel", help="Request cancellation of a running task")
+    p.add_argument("--task-id", required=True)
+
+    p = sub.add_parser("serve", help="Start the NextClaw web dashboard + API server")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8765)
+
+    p = sub.add_parser("channels", help="Messaging channel integrations")
+    p.add_argument("channel_action", choices=["telegram"])
 
     p = sub.add_parser("remember")
     p.add_argument("--text", required=True)
@@ -300,6 +349,9 @@ def main(argv=None) -> int:
         "run-agent": lambda: cmd_run_agent(args, cfg),
         "resume": lambda: cmd_resume(args, cfg),
         "status": lambda: cmd_status(args, cfg),
+        "cancel": lambda: cmd_cancel(args, cfg),
+        "serve": lambda: cmd_serve(args, cfg),
+        "channels": lambda: cmd_channels(args, cfg),
         "remember": lambda: cmd_remember(args, cfg),
         "recall": lambda: cmd_recall(args, cfg),
         "forget": lambda: cmd_forget(args, cfg),

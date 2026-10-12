@@ -13,7 +13,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 
-TASK_STATUSES = {"queued", "running", "awaiting_approval", "failed", "completed"}
+TASK_STATUSES = {"queued", "running", "awaiting_approval", "failed", "completed", "cancelled"}
 STEP_STATUSES = {"pending", "running", "awaiting_approval", "failed", "done"}
 
 
@@ -79,7 +79,60 @@ class TaskStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_task ON turns(task_id, ord)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    ts REAL NOT NULL,
+                    kind TEXT NOT NULL,
+                    data_json TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY(task_id) REFERENCES tasks(id)
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_task ON task_events(task_id, id)")
+            # -- lightweight migrations -----------------------------------
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+            if "cancel_requested" not in cols:
+                conn.execute("ALTER TABLE tasks ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0")
 
+    # -- cancellation ----------------------------------------------------
+    def request_cancel(self, task_id: str) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE tasks SET cancel_requested = 1, updated_at = ? WHERE id = ?",
+                (time.time(), task_id),
+            )
+            return cur.rowcount > 0
+
+    def cancel_requested(self, task_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT cancel_requested FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            return bool(row and row[0])
+
+    # -- events ----------------------------------------------------------
+    def add_event(self, task_id: str, kind: str, data: Optional[Dict[str, Any]] = None) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO task_events (task_id, ts, kind, data_json) VALUES (?, ?, ?, ?)",
+                (task_id, time.time(), kind, json.dumps(data or {})),
+            )
+            return int(cur.lastrowid)
+
+    def list_events(self, task_id: str, since_id: int = 0, limit: int = 200) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, ts, kind, data_json FROM task_events"
+                " WHERE task_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
+                (task_id, since_id, limit),
+            ).fetchall()
+            return [
+                {"id": r[0], "ts": r[1], "kind": r[2], "data": json.loads(r[3])}
+                for r in rows
+            ]
     # -- tasks -----------------------------------------------------------
     def create_task(self, goal: str, task_type: str, params: Dict[str, Any]) -> str:
         task_id = uuid.uuid4().hex[:12]
