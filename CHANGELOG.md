@@ -2,6 +2,39 @@
 
 All notable changes to NextClaw. Dates are in IST (Asia/Kolkata).
 
+## Unreleased — universal provider system
+
+- **Universal AI provider system** (`nextclaw/providers.py`): modular,
+  provider-agnostic model layer. Five stdlib adapters — `openai_compat`
+  (OpenAI, Azure, Groq, OpenRouter, DeepSeek, Mistral, xAI, Together,
+  Fireworks, Cerebras, GitHub Models, Hugging Face, LM Studio, llama.cpp,
+  LocalAI, vLLM, custom endpoints), `anthropic` (native Messages API),
+  `gemini` (native function calling), `ollama` (native), `bedrock`
+  (Converse API + SigV4 signing) — behind one normalized interface.
+  LiteLLM was evaluated and deliberately not adopted (dependency weight;
+  see `docs/PROVIDERS.md`).
+- **Provider configuration store**: SQLite (`providers.db`, 0600) with
+  add/edit/test/enable/disable/remove; secrets via env-var reference
+  (preferred) or stored masked; SSRF guard on custom URLs; masked secrets
+  in every API response; redaction in logs.
+- **Dashboard Providers page rewritten**: provider cards with capability
+  badges, test-connectivity, test-prompt with live results, model
+  discovery, default + ordered fallbacks UI, full CRUD form with 21 presets.
+- **Agent decoupled from vendors**: `run-agent` resolves a default +
+  fallback chain; transient errors retry with backoff, quota exhaustion
+  never retries the same provider, auth errors never loop. Tool calls are
+  validated against declared tools (unknown tools never execute).
+  Experimental opt-in JSON tool-compat mode for models without native
+  calling, explicitly labeled.
+- **CLI**: `nextclaw providers list|test|set-default|presets`.
+- **Chromium audit**: `browsertools.check_chromium()` CDP render probe +
+  `/api/status` reporting. Corrected 2026-10-12: the binary renders fine
+  via the DevTools protocol (navigate + evaluate + screenshot verified);
+  only the `--dump-dom`/`--screenshot` CLI flags are dead in this build.
+- **Docs**: new `docs/PROVIDERS.md` (setup, local models, custom
+  endpoints, fallbacks, security, migration); README/LIMITATIONS updated.
+- **Tests**: 57 new (57 provider + API), 142 total, all offline/mocked.
+
 ## Unreleased — dashboard milestone
 
 - **Web dashboard** (`nextclaw serve`): dependency-free SPA + stdlib JSON API

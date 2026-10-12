@@ -109,13 +109,31 @@ stops on the explicit success criterion instead of second-guessing it.
 
 ### Providers
 
-| Provider | Setup | Status |
-|---|---|---|
-| **Gemini** (default) | `NEXTCLAW_GEMINI_API_KEY` | Function calling verified working with `gemini-3.7-flash`; quota-guarded |
-| **Ollama** | `NEXTCLAW_OLLAMA_URL` + `NEXTCLAW_OLLAMA_MODEL` | Implemented; not tested in this environment (needs local models) |
+NextClaw is provider-agnostic — the agent loop talks to a normalized
+interface, and you switch models through configuration, never code edits:
 
-An OpenAI-compatible provider interface exists but is not yet implemented —
-it fails closed with a clear error rather than pretending to work.
+| Adapter | Covers |
+|---|---|
+| OpenAI-compatible | OpenAI, Azure OpenAI, Groq, OpenRouter, DeepSeek, Mistral, xAI, Together, Fireworks, Cerebras, GitHub Models, Hugging Face, LM Studio, llama.cpp, LocalAI, vLLM, custom endpoints |
+| Anthropic | Claude via native Messages API |
+| Gemini | Google AI Studio via native function calling (verified working) |
+| Ollama | Local models via native `/api/chat` |
+| Bedrock | AWS Bedrock Converse API (SigV4, stdlib) |
+
+Add providers in the dashboard (**Providers** page: add, test, send a test
+prompt, set default, order fallbacks), via the API
+(`POST /api/providers/configs`), or the CLI:
+
+```bash
+python3 -m nextclaw.cli providers presets
+python3 -m nextclaw.cli providers test --name my-openai
+```
+
+Keys live in environment variables (preferred, e.g. `OPENAI_API_KEY`) or the
+server-side store — never in the frontend, never in full in any API
+response. See [docs/PROVIDERS.md](docs/PROVIDERS.md) for the full guide,
+including local-model setup, custom endpoints, fallbacks, and the LiteLLM
+evaluation.
 
 ## How it works
 
@@ -187,8 +205,8 @@ nextclaw/
     bench.py        # reproducible benchmark suite
     cli.py          # command-line interface
     cycle.py        # autonomous dev-cycle runner
-  tests/            # 85 tests, all offline (live test env-gated)
-  docs/             # deployment guide
+  tests/            # 142 tests, all offline (live test env-gated)
+  docs/             # deployment guide + provider guide
   examples/demo.py  # self-contained end-to-end demo (temp dirs only)
   assets/           # logo, banner, social preview (SVG)
   .github/          # CI, issue/PR templates
@@ -201,11 +219,11 @@ nextclaw/
 | `NEXTCLAW_DATA_DIR` | `~/.nextclaw` | SQLite state, logs |
 | `NEXTCLAW_WORKSPACE` | `~/workspace` | agent workspace root (tools are confined here) |
 | `NEXTCLAW_MODEL_PROVIDER` | `stub` | deterministic planner provider |
-| `NEXTCLAW_LLM_PROVIDER` | `gemini` | `gemini` \| `ollama` |
-| `NEXTCLAW_LLM_MODEL` | `gemini-3.7-flash` | model name |
-| `NEXTCLAW_GEMINI_API_KEY` | — | required for `run-agent` with Gemini |
-| `NEXTCLAW_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama base URL |
-| `NEXTCLAW_OLLAMA_MODEL` | — | required for Ollama provider |
+| `NEXTCLAW_LLM_PROVIDER` | `gemini` | legacy default; auto-migrated to a provider config on first run |
+| `NEXTCLAW_LLM_MODEL` | `gemini-3.7-flash` | legacy model; auto-migrated |
+| `NEXTCLAW_GEMINI_API_KEY` | — | Gemini key (also: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, … — see [docs/PROVIDERS.md](docs/PROVIDERS.md) for the full env map) |
+| `NEXTCLAW_OLLAMA_URL` | `http://127.0.0.1:11434` | legacy Ollama URL; auto-migrated |
+| `NEXTCLAW_OLLAMA_MODEL` | — | legacy Ollama model; auto-migrated |
 | `NEXTCLAW_LLM_TIMEOUT_S` | `60` | per model-call timeout |
 | `NEXTCLAW_LLM_MAX_PER_DAY` | `200` | daily API request cap |
 | `NEXTCLAW_OFFLINE` | — | set to `1` to disable all model calls |
@@ -216,7 +234,7 @@ real keys).
 ## Testing
 
 ```bash
-python3 -m unittest discover -s tests          # full suite (85 tests), offline
+python3 -m unittest discover -s tests          # full suite (142 tests), offline
 NEXTCLAW_LIVE_TESTS=1 python3 -m unittest tests.test_llm_live   # needs API key
 python3 examples/demo.py                        # end-to-end demo in temp dirs
 python3 -m nextclaw.cli bench                   # benchmark suite
@@ -229,7 +247,8 @@ default so CI and contributors never burn quota.
 
 | Symptom | Cause / fix |
 |---|---|
-| `Gemini provider needs NEXTCLAW_GEMINI_API_KEY` | export the key, or use offline `run` |
+| `no usable AI provider configured` | add a provider in the dashboard (Providers) or export a key, e.g. `NEXTCLAW_GEMINI_API_KEY` |
+| `Gemini provider needs NEXTCLAW_GEMINI_API_KEY` (legacy path) | export the key, or use offline `run` |
 | `quota cooldown active` | free-tier quota exhausted; wait or raise `llm_quota_cooldown_s` |
 | `approval required for tool 'exec.run'` | resume with `--approve exec.run` after reviewing, or approve in the dashboard |
 | `path escapes workspace root` | tools are confined to `NEXTCLAW_WORKSPACE` by design |

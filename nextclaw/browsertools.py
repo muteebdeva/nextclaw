@@ -3,8 +3,10 @@
 ``browser.fetch`` retrieves a page over HTTP(S) and returns structured,
 verifier-inspectable output (title, text, links). It is deliberately
 read-only: no JavaScript execution, no clicking, no form submission, no
-screenshots. Interactive browsing requires a working headless Chromium,
-which is not available in all environments (see LIMITATIONS.md).
+screenshots. ``check_chromium()`` probes local Chromium rendering over the
+DevTools protocol (the one-shot ``--dump-dom``/``--screenshot`` CLI flags
+are broken in some builds; CDP navigate+evaluate+screenshot is the honest
+probe). See LIMITATIONS.md.
 
 Safety:
   - Only http/https URLs.
@@ -36,6 +38,217 @@ USER_AGENT = "nextclaw/0.2 (+research tool)"
 
 class BrowserError(Exception):
     pass
+
+
+_CHROMIUM_CANDIDATES = (
+    "/opt/meta-chromium/chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+)
+
+
+def check_chromium() -> Dict[str, Any]:
+    """Honest capability probe for browser rendering via DevTools protocol.
+
+    NOTE (audited 2026-10-12): this build's one-shot CLI flags
+    (--dump-dom/--screenshot) silently produce no output, but the browser
+    itself renders fine — verified via CDP: Page.navigate + Runtime.evaluate
+    + Page.captureScreenshot all succeed. So the probe drives the browser
+    over CDP instead of trusting the CLI flags. Result cached 10 minutes.
+    """
+    import time as _time
+    now = _time.time()
+    cached = _CHROMIUM_PROBE_CACHE.get("result")
+    if cached and now - _CHROMIUM_PROBE_CACHE.get("at", 0) < 600:
+        return dict(cached)
+    result = _probe_chromium_cdp()
+    _CHROMIUM_PROBE_CACHE["result"] = result
+    _CHROMIUM_PROBE_CACHE["at"] = now
+    return dict(result)
+
+
+_CHROMIUM_PROBE_CACHE: Dict[str, Any] = {}
+
+
+def _probe_chromium_cdp() -> Dict[str, Any]:
+    """Launch headless Chromium with CDP and verify real rendering."""
+    import shutil
+    import socket
+    import subprocess
+    import tempfile
+
+    binary = None
+    for cand in _CHROMIUM_CANDIDATES:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            binary = cand
+            break
+    if binary is None:
+        found = shutil.which("chromium") or shutil.which("google-chrome")
+        if found:
+            binary = found
+    if binary is None:
+        return {"available": False, "binary": None, "version": None,
+                "reason": "no Chromium/Chrome binary found"}
+    try:
+        proc = subprocess.run([binary, "--version"], capture_output=True,
+                              text=True, timeout=15)
+        version = (proc.stdout or "").strip() or None
+    except Exception as exc:
+        return {"available": False, "binary": binary, "version": None,
+                "reason": f"binary failed to execute: {exc}"}
+
+    # Free loopback port for the DevTools endpoint.
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    profile = tempfile.mkdtemp(prefix="nc-chromium-probe-")
+    browser = subprocess.Popen(
+        [binary, "--headless", "--no-sandbox", "--disable-dev-shm-usage",
+         "--disable-gpu", f"--remote-debugging-port={port}",
+         "--remote-debugging-address=127.0.0.1",
+         f"--user-data-dir={profile}", "about:blank"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        import time as _time
+        import urllib.request as _url
+        deadline = _time.time() + 25
+        targets = None
+        while _time.time() < deadline:
+            try:
+                with _url.urlopen(f"http://127.0.0.1:{port}/json/list",
+                                  timeout=3) as resp:
+                    import json as _json
+                    targets = _json.loads(resp.read().decode())
+                if targets:
+                    break
+            except Exception:
+                _time.sleep(0.5)
+        if not targets:
+            return {"available": False, "binary": binary, "version": version,
+                    "reason": "CDP endpoint did not come up"}
+        ok = _cdp_render_check(targets[0]["webSocketDebuggerUrl"])
+        if ok:
+            return {"available": True, "binary": binary, "version": version,
+                    "reason": "CDP render probe succeeded "
+                              "(navigate + evaluate + screenshot)"}
+        return {"available": False, "binary": binary, "version": version,
+                "reason": "CDP render probe failed"}
+    finally:
+        try:
+            browser.terminate()
+            browser.wait(timeout=10)
+        except Exception:
+            try:
+                browser.kill()
+            except Exception:
+                pass
+        shutil.rmtree(profile, ignore_errors=True)
+
+
+def _cdp_render_check(ws_url: str) -> bool:
+    """Minimal stdlib WebSocket CDP client: navigate, evaluate, screenshot."""
+    import base64
+    import hashlib
+    import json
+    import os as _os
+    import socket as _socket
+    import struct
+    import time as _time
+
+    parts = ws_url.split("/")
+    host, p = parts[2].split(":")
+    path = "/" + "/".join(parts[3:])
+    s = _socket.create_connection((host, int(p)), timeout=15)
+    try:
+        key = base64.b64encode(_os.urandom(16)).decode()
+        s.sendall(
+            f"GET {path} HTTP/1.1\r\nHost: {parts[2]}\r\n"
+            f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+        resp = b""
+        while b"\r\n\r\n" not in resp:
+            resp += s.recv(4096)
+        if b"101" not in resp.split(b"\r\n")[0]:
+            return False
+
+        def _recvn(n: int) -> bytes:
+            buf = b""
+            while len(buf) < n:
+                chunk = s.recv(n - len(buf))
+                if not chunk:
+                    raise RuntimeError("closed")
+                buf += chunk
+            return buf
+
+        def _send(obj) -> None:
+            data = json.dumps(obj).encode()
+            mask = _os.urandom(4)
+            n = len(data)
+            if n < 126:
+                hdr = bytes([0x81, 0x80 | n])
+            elif n < 65536:
+                hdr = bytes([0x81, 0x80 | 126]) + struct.pack(">H", n)
+            else:
+                hdr = bytes([0x81, 0x80 | 127]) + struct.pack(">Q", n)
+            s.sendall(hdr + mask + bytes(b ^ mask[i % 4]
+                                         for i, b in enumerate(data)))
+
+        def _recv_msg():
+            payload = b""
+            while True:
+                h = _recvn(2)
+                fin, opcode = h[0] & 0x80, h[0] & 0x0F
+                ln = h[1] & 0x7F
+                if ln == 126:
+                    ln = struct.unpack(">H", _recvn(2))[0]
+                elif ln == 127:
+                    ln = struct.unpack(">Q", _recvn(8))[0]
+                data = _recvn(ln)
+                if opcode == 0x8:
+                    raise RuntimeError("closed by peer")
+                if opcode == 0x9:  # ping -> pong
+                    s.sendall(bytes([0x8A, len(data)]) + data)
+                    continue
+                payload += data
+                if fin:
+                    return payload
+
+        mid = 0
+
+        def _cmd(method: str, params=None, timeout_s: int = 20):
+            nonlocal mid
+            mid += 1
+            _send({"id": mid, "method": method, "params": params or {}})
+            deadline = _time.time() + timeout_s
+            while _time.time() < deadline:
+                msg = json.loads(_recv_msg().decode())
+                if msg.get("id") == mid:
+                    if "error" in msg:
+                        raise RuntimeError(str(msg["error"]))
+                    return msg
+            raise RuntimeError("cdp command timed out")
+
+        _cmd("Page.navigate",
+             {"url": "data:text/html,<html><body><h1>nextclaw-probe</h1></body></html>"})
+        _time.sleep(1.5)
+        ev = _cmd("Runtime.evaluate",
+                  {"expression": "document.body.innerText"})
+        if "nextclaw-probe" not in str(
+                ev.get("result", {}).get("result", {}).get("value", "")):
+            return False
+        shot = _cmd("Page.captureScreenshot", {"format": "png"})
+        raw = base64.b64decode(shot["result"]["data"])
+        return raw[:8] == b"\x89PNG\r\n\x1a\n" and len(raw) > 1000
+    except Exception:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
 
 
 def _public_ip_ok(host: str) -> None:

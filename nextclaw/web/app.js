@@ -199,11 +199,25 @@
   }
 
   function providerSummary(providers) {
-    return Object.keys(providers).map(function (name) {
-      var p = providers[name];
-      var st = p.configured ? '<span class="pill done">configured</span>' : '<span class="pill queued">not configured</span>';
+    if (providers && providers.default_id !== undefined) {
+      var dflt = providers.default_name
+        ? '<strong>' + esc(providers.default_name) + '</strong>' +
+          "<div class='stat-sub'>" + esc(providers.default_model || "no model") + " · default</div>"
+        : "<div class='stat-sub'>no provider configured</div>";
+      return '<div style="padding:8px 0">' + dflt +
+        "<div class='stat-sub'>" + providers.count + " configured" +
+        (providers.fallback_ids && providers.fallback_ids.length
+          ? " · " + providers.fallback_ids.length + " fallback(s)" : "") + "</div></div>";
+    }
+    return Object.keys(providers).map(function (key) {
+      var p = providers[key];
+      var ok = (p.configured !== undefined) ? p.configured : !!p.enabled;
+      var label = p.name || key;
+      var sub = p.model || "—";
+      if (p.is_default) sub += " · default";
+      var st = ok ? '<span class="pill done">configured</span>' : '<span class="pill queued">not configured</span>';
       return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">' +
-        "<div><strong>" + esc(name) + "</strong><div class='stat-sub'>" + esc(p.model || "—") + "</div></div>" + st + "</div>";
+        "<div><strong>" + esc(label) + "</strong><div class='stat-sub'>" + esc(sub) + "</div></div>" + st + "</div>";
     }).join("");
   }
 
@@ -506,48 +520,348 @@
   }
 
   /* ---------- providers ---------- */
+  var ADAPTER_LABELS = {
+    openai_compat: "OpenAI-compatible", anthropic: "Anthropic",
+    gemini: "Gemini", ollama: "Ollama", bedrock: "Bedrock"
+  };
+
   function renderProviders() {
     loading(view);
-    Promise.all([api("/api/providers"), api("/api/quota")]).then(function (r) {
-      var p = r[0].providers, quota = r[1];
-      view.innerHTML =
-        '<div class="page-head"><div><h1>Providers</h1>' +
-        "<p>Keys live in environment variables and are never shown here.</p></div></div>" +
-        '<div class="grid cols-2">' +
-        providerCard("gemini", p.gemini, "Free-tier friendly. Function calling verified.") +
-        providerCard("ollama", p.ollama, "Local models. No quota, needs local RAM.") +
-        "</div>" +
+    Promise.all([
+      api("/api/providers/configs"), api("/api/providers/presets"),
+      api("/api/providers/routing"), api("/api/quota")
+    ]).then(function (r) {
+      var configs = r[0].configs, presets = r[1].presets,
+          routing = r[2], quota = r[3];
+      var byId = {};
+      configs.forEach(function (c) { byId[c.id] = c; });
+
+      var html =
+        '<div class="page-head"><div><h1>AI Providers &amp; Models</h1>' +
+        "<p>Keys stay on the server and are never shown in full. " +
+        "Prefer <span class='mono'>env:VAR_NAME</span> references over pasted keys.</p></div>" +
+        '<div><button class="btn" id="p-add">Add provider</button></div></div>' +
+
+        '<div class="card"><h3>Routing</h3>' +
+        '<div class="kv"><dt>Default model</dt><dd><select id="p-default">' +
+        configs.filter(function (c) { return c.enabled; }).map(function (c) {
+          return '<option value="' + esc(c.id) + '"' +
+            (c.id === routing.default_id ? " selected" : "") + ">" +
+            esc(c.name) + " · " + esc(c.model || "no model") + "</option>";
+        }).join("") + "</select></dd>" +
+        "<dt>Fallbacks (in order)</dt><dd id='p-fallbacks'>" +
+        routing.fallback_ids.map(function (id, i) {
+          var c = byId[id];
+          if (!c) return "";
+          return '<div class="fb-row"><span class="mono">' + esc(c.name) + "</span>" +
+            ' <button class="btn small" data-fb="up" data-id="' + esc(id) + '">↑</button>' +
+            ' <button class="btn small" data-fb="down" data-id="' + esc(id) + '">↓</button>' +
+            ' <button class="btn small" data-fb="rm" data-id="' + esc(id) + '">✕</button></div>';
+        }).join("") + "</dd></div>" +
+        '<div class="toolbar"><button class="btn small" id="p-save-routing">Save routing</button>' +
+        ' <span class="stat-sub">Fallbacks are tried in order on transient failures, ' +
+        "rate limits, and quota exhaustion. Auth errors never retry the same provider.</span></div></div>" +
+
+        '<div class="grid cols-2" style="margin-top:16px">' +
+        configs.map(providerCard).join("") + "</div>" +
+
         '<div class="card" style="margin-top:16px"><h3>Usage &amp; quota</h3>' +
         '<div class="kv"><dt>Requests today</dt><dd>' + quota.daily_used + " / " + quota.daily_cap + "</dd>" +
-        "<dt>Cooldown</dt><dd>" + (quota.cooldown_active ? "active — " + quota.cooldown_left_s + "s left" : "none") + "</dd>" +
-        "<dt>Active provider</dt><dd class='mono'>" + esc(r[0].active) + "</dd></div></div>";
+        "<dt>Cooldown</dt><dd>" + (quota.cooldown_active ? "active — " + quota.cooldown_left_s + "s left" : "none") +
+        "</dd></div></div>" +
+
+        '<div class="card hidden" id="p-form-card" style="margin-top:16px"><h3 id="p-form-title">Add provider</h3>' +
+        '<div class="kv">' +
+        '<dt>Preset</dt><dd><select id="pf-preset"><option value="">— custom —</option>' +
+        presets.map(function (p) {
+          return '<option value="' + esc(p.id) + '">' + esc(p.display) + "</option>";
+        }).join("") + "</select> <span class='stat-sub' id='pf-preset-note'></span></dd>" +
+        '<dt>Name</dt><dd><input id="pf-name" placeholder="my-openai"></dd>' +
+        '<dt>Adapter</dt><dd><select id="pf-adapter">' +
+        Object.keys(ADAPTER_LABELS).map(function (a) {
+          return '<option value="' + a + '">' + ADAPTER_LABELS[a] + "</option>";
+        }).join("") + "</select></dd>" +
+        '<dt>Base URL</dt><dd><input id="pf-base" class="mono" placeholder="https://api.openai.com"></dd>' +
+        '<dt>Model</dt><dd><input id="pf-model" class="mono" placeholder="gpt-5-mini"> ' +
+        '<button class="btn small" id="pf-discover" type="button">Discover</button> ' +
+        '<select id="pf-models" class="hidden"></select></dd>' +
+        '<dt>API key</dt><dd><input id="pf-key" type="password" autocomplete="off" placeholder="leave blank to keep existing"> ' +
+        '<span class="stat-sub">stored server-side, 0600</span></dd>' +
+        '<dt>Key from env var</dt><dd><input id="pf-keyenv" class="mono" placeholder="OPENAI_API_KEY"> ' +
+        '<span class="stat-sub">preferred — wins over a stored key</span></dd>' +
+        '<dt>AWS secret key</dt><dd><input id="pf-awssecret" type="password" autocomplete="off" placeholder="Bedrock only"></dd>' +
+        '<dt>Extra headers (JSON)</dt><dd><input id="pf-headers" class="mono" placeholder=\'{"HTTP-Referer": "https://example.com"}\'></dd>' +
+        '<dt>Extra params (JSON)</dt><dd><input id="pf-params" class="mono" placeholder=\'{"api-version": "2024-10-21"}\'></dd>' +
+        '<dt>Timeout (s)</dt><dd><input id="pf-timeout" type="number" value="60" min="5" max="600"></dd>' +
+        '<dt>Max retries</dt><dd><input id="pf-retries" type="number" value="2" min="0" max="10"></dd>' +
+        "</div>" +
+        '<div class="toolbar">' +
+        '<label><input type="checkbox" id="pf-private"> allow private/loopback URL (LAN inference)</label> ' +
+        '<label><input type="checkbox" id="pf-compat"> JSON tool-compat mode (experimental)</label> ' +
+        '<label><input type="checkbox" id="pf-enabled" checked> enabled</label></div>' +
+        '<div class="toolbar"><button class="btn" id="pf-save">Save</button> ' +
+        '<button class="btn small" id="pf-cancel">Cancel</button> ' +
+        '<span class="stat-sub" id="pf-err"></span></div></div>';
+
+      view.innerHTML = html;
+      window._ncPresets = presets;
+      window._ncConfigs = configs;
+      window._ncRouting = routing;
+      bindProviders();
     }).catch(function (e) { showError(view, e); });
   }
 
-  function providerCard(name, p, blurb) {
-    var idp = name.replace(/[^a-z]/g, "");
-    return '<div class="card"><h3>' + esc(name) + '</h3><p class="stat-sub">' + esc(blurb) + "</p>" +
-      '<div class="kv"><dt>Status</dt><dd>' + (p.configured ? '<span class="pill done">configured</span>' : '<span class="pill queued">not configured</span>') + "</dd>" +
-      "<dt>Model</dt><dd class='mono'>" + esc(p.model || "—") + "</dd>" +
-      (p.url ? "<dt>Endpoint</dt><dd class='mono'>" + esc(p.url) + "</dd>" : "") + "</div>" +
-      '<div class="toolbar"><button class="btn small" id="pt-' + idp + '">Test connectivity</button></div>' +
-      '<div class="stat-sub" id="pr-' + idp + '" style="margin-top:8px"></div></div>';
+  function capBadges(caps) {
+    function pill(on, label, title) {
+      return '<span class="pill ' + (on ? "done" : "queued") + '" title="' + esc(title) + '">' + label + "</span>";
+    }
+    return pill(caps.tools, "tools", "Native tool/function calling") +
+      pill(caps.streaming, "stream", "Streaming responses") +
+      pill(caps.vision, "vision", "Image input") +
+      pill(caps.json_mode, "json", "JSON mode");
   }
 
-  function renderProvidersBound() {
-    ["gemini", "ollama"].forEach(function (name) {
-      var idp = name.replace(/[^a-z]/g, "");
-      var btn = document.getElementById("pt-" + idp);
-      if (btn) btn.addEventListener("click", function () {
-        var res = document.getElementById("pr-" + idp);
-        res.textContent = "Testing…";
-        api("/api/providers/test", { method: "POST", body: { provider: name } }).then(function (d) {
-          res.innerHTML = d.ok
-            ? '<span class="pill done">reachable</span> <span class="stat-sub">' + esc((d.models || d.models_sample || []).join(", ")) + "</span>"
-            : '<span class="pill failed">failed</span> <span class="stat-sub">' + esc(d.error || "") + "</span>";
-        }).catch(function (e) { res.textContent = e.message; });
+  function providerCard(c) {
+    var caps = c.capabilities || {};
+    var test = c.last_test_at
+      ? (c.last_test_ok ? '<span class="pill done">ok</span>'
+         : '<span class="pill failed" title="' + esc(c.last_test_error || "") + '">failed</span>')
+      : '<span class="stat-sub">not tested</span>';
+    return '<div class="card"><h3>' + esc(c.name) +
+      (c.enabled ? "" : ' <span class="pill queued">disabled</span>') + "</h3>" +
+      '<div class="kv">' +
+      "<dt>Adapter</dt><dd>" + esc(ADAPTER_LABELS[c.adapter] || c.adapter) + "</dd>" +
+      "<dt>Model</dt><dd class='mono'>" + esc(c.model || "—") + "</dd>" +
+      (c.base_url ? "<dt>Endpoint</dt><dd class='mono'>" + esc(c.base_url) + "</dd>" : "") +
+      "<dt>Key</dt><dd class='mono'>" + esc(c.api_key_masked || "—") + "</dd>" +
+      "<dt>Capabilities</dt><dd>" + capBadges(caps) +
+      (caps.note ? ' <span class="stat-sub">' + esc(caps.note) + "</span>" : "") + "</dd>" +
+      "<dt>Last test</dt><dd>" + test + "</dd></div>" +
+      '<div class="toolbar">' +
+      '<button class="btn small" data-act="test" data-id="' + esc(c.id) + '">Test</button> ' +
+      '<button class="btn small" data-act="prompt" data-id="' + esc(c.id) + '">Test prompt</button> ' +
+      '<button class="btn small" data-act="edit" data-id="' + esc(c.id) + '">Edit</button> ' +
+      '<button class="btn small" data-act="toggle" data-id="' + esc(c.id) + '">' + (c.enabled ? "Disable" : "Enable") + "</button> " +
+      '<button class="btn small" data-act="default" data-id="' + esc(c.id) + '">Set default</button> ' +
+      '<button class="btn small" data-act="fallback" data-id="' + esc(c.id) + '">± Fallback</button> ' +
+      '<button class="btn small" data-act="del" data-id="' + esc(c.id) + '">Delete</button></div>' +
+      '<div class="stat-sub" id="pr-' + esc(c.id) + '" style="margin-top:8px"></div>' +
+      '<div class="hidden" id="pp-' + esc(c.id) + '" style="margin-top:8px">' +
+      '<textarea id="ppt-' + esc(c.id) + '" rows="2" style="width:100%" placeholder="Test prompt…"></textarea>' +
+      '<div class="toolbar"><button class="btn small" data-act="send" data-id="' + esc(c.id) + '">Send</button></div>' +
+      '<div class="mono" id="ppo-' + esc(c.id) + '" style="white-space:pre-wrap"></div></div></div>';
+  }
+
+  function bindProviders() {
+    var addBtn = document.getElementById("p-add");
+    if (addBtn) addBtn.addEventListener("click", function () { openForm(null); });
+
+    document.getElementById("p-save-routing").addEventListener("click", function () {
+      var def = document.getElementById("p-default").value;
+      api("/api/providers/routing", {
+        method: "POST", body: { default_id: def, fallback_ids: window._ncRouting.fallback_ids }
+      }).then(function () { toast("Routing saved"); renderProviders(); })
+        .catch(function (e) { toast(e.message, "bad"); });
+    });
+
+    view.querySelectorAll("[data-fb]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var fb = window._ncRouting.fallback_ids.slice();
+        var id = btn.getAttribute("data-id"), op = btn.getAttribute("data-fb");
+        var i = fb.indexOf(id);
+        if (op === "rm") fb.splice(i, 1);
+        if (op === "up" && i > 0) { fb[i] = fb[i - 1]; fb[i - 1] = id; }
+        if (op === "down" && i < fb.length - 1) { fb[i] = fb[i + 1]; fb[i + 1] = id; }
+        window._ncRouting.fallback_ids = fb;
+        api("/api/providers/routing", { method: "POST", body: { fallback_ids: fb } })
+          .then(function () { renderProviders(); })
+          .catch(function (e) { toast(e.message, "bad"); });
       });
     });
+
+    view.querySelectorAll("[data-act]").forEach(function (btn) {
+      btn.addEventListener("click", function () { cardAction(btn); });
+    });
+  }
+
+  function cardAction(btn) {
+    var id = btn.getAttribute("data-id"), act = btn.getAttribute("data-act");
+    var res = document.getElementById("pr-" + id);
+    if (act === "test") {
+      res.textContent = "Testing…";
+      api("/api/providers/configs/" + id + "/test", { method: "POST" }).then(function (d) {
+        res.innerHTML = d.ok
+          ? '<span class="pill done">reachable</span> <span class="stat-sub">' + esc((d.models || d.models_sample || []).join(", ")) + " " + esc(d.note || "") + "</span>"
+          : '<span class="pill failed">failed</span> <span class="stat-sub">' + esc(d.error || "") + "</span>";
+      }).catch(function (e) { res.textContent = e.message; });
+    } else if (act === "prompt") {
+      document.getElementById("pp-" + id).classList.toggle("hidden");
+    } else if (act === "send") {
+      var prompt = document.getElementById("ppt-" + id).value.trim();
+      var out = document.getElementById("ppo-" + id);
+      if (!prompt) { out.textContent = "Enter a prompt first."; return; }
+      out.textContent = "Thinking…";
+      api("/api/providers/configs/" + id + "/chat", { method: "POST", body: { prompt: prompt } })
+        .then(function (d) {
+          out.textContent = d.text + "\n\n— " + d.model + " · " + d.latency_ms + "ms · " + d.finish_reason;
+        })
+        .catch(function (e) { out.textContent = "Error: " + e.message; });
+    } else if (act === "edit") {
+      var cfg = window._ncConfigs.filter(function (c) { return c.id === id; })[0];
+      openForm(cfg);
+    } else if (act === "toggle") {
+      var c2 = window._ncConfigs.filter(function (c) { return c.id === id; })[0];
+      api("/api/providers/configs/" + id, { method: "PUT", body: { enabled: !c2.enabled } })
+        .then(function () { renderProviders(); }).catch(function (e) { toast(e.message, "bad"); });
+    } else if (act === "default") {
+      api("/api/providers/routing", { method: "POST", body: { default_id: id } })
+        .then(function () { toast("Default updated"); renderProviders(); })
+        .catch(function (e) { toast(e.message, "bad"); });
+    } else if (act === "fallback") {
+      var fb = window._ncRouting.fallback_ids.slice();
+      var i = fb.indexOf(id);
+      if (i >= 0) fb.splice(i, 1); else fb.push(id);
+      api("/api/providers/routing", { method: "POST", body: { fallback_ids: fb } })
+        .then(function () { renderProviders(); }).catch(function (e) { toast(e.message, "bad"); });
+    } else if (act === "del") {
+      if (!confirm("Delete this provider configuration?")) return;
+      api("/api/providers/configs/" + id, { method: "DELETE" })
+        .then(function () { renderProviders(); }).catch(function (e) { toast(e.message, "bad"); });
+    }
+  }
+
+  function openForm(cfg) {
+    var card = document.getElementById("p-form-card");
+    card.classList.remove("hidden");
+    document.getElementById("p-form-title").textContent = cfg ? "Edit provider" : "Add provider";
+    card.dataset.editId = cfg ? cfg.id : "";
+    var presets = window._ncPresets || [];
+    function fill(p) {
+      document.getElementById("pf-adapter").value = p.adapter;
+      document.getElementById("pf-base").value = p.base_url || "";
+      document.getElementById("pf-model").value = p.default_model || "";
+      document.getElementById("pf-keyenv").value = p.api_key_env || "";
+      document.getElementById("pf-params").value = p.extra_params ? JSON.stringify(p.extra_params) : "";
+      document.getElementById("pf-private").checked = !!p.allow_private;
+      document.getElementById("pf-preset-note").textContent = p.notes || "";
+    }
+    document.getElementById("pf-preset").onchange = function (e) {
+      var p = presets.filter(function (x) { return x.id === e.target.value; })[0];
+      if (p) {
+        if (!cfg) document.getElementById("pf-name").value = p.display.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        fill(p);
+      } else document.getElementById("pf-preset-note").textContent = "";
+    };
+    if (cfg) {
+      document.getElementById("pf-name").value = cfg.name;
+      document.getElementById("pf-adapter").value = cfg.adapter;
+      document.getElementById("pf-base").value = cfg.base_url || "";
+      document.getElementById("pf-model").value = cfg.model || "";
+      document.getElementById("pf-keyenv").value = cfg.api_key_env || "";
+      document.getElementById("pf-params").value = JSON.stringify(cfg.extra_params || {});
+      document.getElementById("pf-headers").value = JSON.stringify(cfg.extra_headers || {});
+      document.getElementById("pf-timeout").value = cfg.timeout_s || 60;
+      document.getElementById("pf-retries").value = cfg.max_retries != null ? cfg.max_retries : 2;
+      document.getElementById("pf-private").checked = !!cfg.allow_private;
+      document.getElementById("pf-compat").checked = !!cfg.compat_json_tools;
+      document.getElementById("pf-enabled").checked = !!cfg.enabled;
+      document.getElementById("pf-key").placeholder = cfg.api_key_masked
+        ? "stored (" + cfg.api_key_masked + ") — leave blank to keep"
+        : "leave blank for none";
+    } else {
+      ["pf-name", "pf-base", "pf-model", "pf-key", "pf-keyenv", "pf-awssecret",
+       "pf-headers", "pf-params"].forEach(function (i) { document.getElementById(i).value = ""; });
+      document.getElementById("pf-timeout").value = "60";
+      document.getElementById("pf-retries").value = "2";
+      ["pf-private", "pf-compat"].forEach(function (i) { document.getElementById(i).checked = false; });
+      document.getElementById("pf-enabled").checked = true;
+      document.getElementById("pf-key").placeholder = "leave blank to keep existing";
+    }
+    document.getElementById("pf-save").onclick = saveForm;
+    document.getElementById("pf-cancel").onclick = function () { card.classList.add("hidden"); };
+    document.getElementById("pf-discover").onclick = discoverModels;
+    card.scrollIntoView();
+  }
+
+  function parseJsonField(id, errEl) {
+    var v = document.getElementById(id).value.trim();
+    if (!v) return {};
+    try { return JSON.parse(v); }
+    catch (e) { errEl.textContent = "Invalid JSON in " + id; throw e; }
+  }
+
+  function saveForm() {
+    var card = document.getElementById("p-form-card");
+    var errEl = document.getElementById("pf-err");
+    errEl.textContent = "";
+    var body;
+    try {
+      body = {
+        name: document.getElementById("pf-name").value.trim(),
+        adapter: document.getElementById("pf-adapter").value,
+        display_name: "",
+        base_url: document.getElementById("pf-base").value.trim(),
+        model: document.getElementById("pf-model").value.trim(),
+        api_key_env: document.getElementById("pf-keyenv").value.trim(),
+        extra_headers: parseJsonField("pf-headers", errEl),
+        extra_params: parseJsonField("pf-params", errEl),
+        timeout_s: parseInt(document.getElementById("pf-timeout").value, 10) || 60,
+        max_retries: parseInt(document.getElementById("pf-retries").value, 10) || 0,
+        allow_private: document.getElementById("pf-private").checked,
+        compat_json_tools: document.getElementById("pf-compat").checked,
+        enabled: document.getElementById("pf-enabled").checked
+      };
+    } catch (e) { return; }
+    var key = document.getElementById("pf-key").value;
+    var aws = document.getElementById("pf-awssecret").value;
+    if (key) body.api_key = key;
+    if (aws) body.aws_secret_key = aws;
+    if (body.adapter === "bedrock" && !body.extra_params.region) {
+      errEl.textContent = "Bedrock needs a region in extra params, e.g. {\"region\": \"us-east-1\"}";
+      return;
+    }
+    var editId = card.dataset.editId;
+    var req = editId
+      ? api("/api/providers/configs/" + editId, { method: "PUT", body: body })
+      : api("/api/providers/configs", { method: "POST", body: body });
+    req.then(function () { toast("Provider saved"); renderProviders(); })
+      .catch(function (e) { errEl.textContent = e.message; });
+  }
+
+  function discoverModels() {
+    var card = document.getElementById("p-form-card");
+    var editId = card.dataset.editId;
+    var sel = document.getElementById("pf-models");
+    sel.innerHTML = "<option>…</option>";
+    sel.classList.remove("hidden");
+    function done(models) {
+      sel.innerHTML = models.length
+        ? models.map(function (m) { return "<option>" + esc(m) + "</option>"; }).join("")
+        : "<option value=''>no models found</option>";
+    }
+    if (editId) {
+      api("/api/providers/configs/" + editId + "/models").then(function (d) { done(d.models || []); })
+        .catch(function (e) { done([]); toast(e.message, "bad"); });
+    } else {
+      // Unsaved: build a transient probe from the form fields.
+      var body = {
+        name: "probe", adapter: document.getElementById("pf-adapter").value,
+        base_url: document.getElementById("pf-base").value.trim(),
+        model: document.getElementById("pf-model").value.trim() || "probe",
+        api_key: document.getElementById("pf-key").value,
+        api_key_env: document.getElementById("pf-keyenv").value.trim(),
+        allow_private: document.getElementById("pf-private").checked
+      };
+      api("/api/providers/configs", { method: "POST", body: body }).then(function (c) {
+        return api("/api/providers/configs/" + c.id + "/models").then(function (d) {
+          done(d.models || []);
+          return api("/api/providers/configs/" + c.id, { method: "DELETE" }).catch(function () {});
+        });
+      }).catch(function (e) { done([]); toast(e.message, "bad"); });
+    }
+    sel.onchange = function () {
+      if (sel.value) document.getElementById("pf-model").value = sel.value;
+    };
   }
 
   /* ---------- settings ---------- */
@@ -588,7 +902,4 @@
 
   /* ---------- boot ---------- */
   if (token) route(); else lock();
-  // Re-bind provider test buttons after providers page renders.
-  var _observer = new MutationObserver(function () { renderProvidersBound(); });
-  _observer.observe(document.getElementById("view"), { childList: true });
 })();

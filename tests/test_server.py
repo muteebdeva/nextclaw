@@ -73,8 +73,11 @@ class ServerTest(unittest.TestCase):
     def test_status(self):
         status, body = self.req("/api/status")
         self.assertEqual(status, 200)
-        self.assertIn("gemini", body["providers"])
-        self.assertIn("ollama", body["providers"])
+        # New provider-system shape: default routing summary + browser probe.
+        self.assertIn("default_id", body["providers"])
+        self.assertIn("count", body["providers"])
+        self.assertIn("available", body["browser"])
+        self.assertIn("offline", body)
 
     # -- tasks --------------------------------------------------------------
     def test_create_and_run_task(self):

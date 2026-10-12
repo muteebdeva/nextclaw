@@ -17,8 +17,14 @@ Updated as capabilities land.
 
 1. **Browser automation is fetch-only.** `browser.fetch` retrieves and parses
    pages over HTTP with SSRF protection. No JS rendering, clicking, form
-   filling, or screenshots — headless Chromium is non-functional in this
-   environment, so interactive browsing is unimplemented, not stubbed.
+   filling, or screenshots through the agent's tools. Audited 2026-10-12
+   (corrected same day): the Chromium binary (152.0.7977.82) launches fine
+   and **renders correctly** — verified via the DevTools protocol
+   (Page.navigate + Runtime.evaluate + Page.captureScreenshot all succeed).
+   Only the one-shot CLI flags (`--dump-dom`/`--screenshot`) are dead in
+   this build. `browsertools.check_chromium()` probes rendering honestly
+   over CDP (cached 10 min) and `/api/status` reports it. Interactive
+   automation (clicks/forms) remains unimplemented, not stubbed.
 2. **Ollama provider unverified.** Implemented against the Ollama REST API
    but never exercised with a real model here (insufficient RAM).
 3. **Live Gemini tests are quota-gated.** The tool-calling loop was verified

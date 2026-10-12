@@ -70,6 +70,7 @@ class ServerContext:
     def __init__(self, cfg):
         from .approvals import ApprovalGate, ApprovalStore
         from .config import ensure_data_dir
+        from .providers import ProviderStore, seed_from_legacy_config
         from .tasks import TaskStore
 
         ensure_data_dir(cfg)
@@ -87,6 +88,12 @@ class ServerContext:
         self.tasks = TaskStore(cfg.data_dir)
         self.approvals = ApprovalStore(cfg.data_dir)
         self.gate = ApprovalGate(self.approvals, self.tasks)
+        self.provider_store = ProviderStore(cfg.data_dir)
+        # Migrate old llm_provider/llm_model/env settings once, idempotently.
+        try:
+            seed_from_legacy_config(self.provider_store, cfg)
+        except Exception:
+            pass
         self.runner = ThreadPoolExecutor(max_workers=2, thread_name_prefix="nc-task")
         self.running: Dict[str, Any] = {}  # task_id -> Future
         self.rate = RateLimiter()
@@ -200,6 +207,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.do_GET()  # _handle dispatches on method
 
+    def do_PUT(self):
+        self.do_GET()  # _handle dispatches on method
+
+    def do_DELETE(self):
+        self.do_GET()  # _handle dispatches on method
+
     def _handle(self) -> None:
         method, path, qs = self._route()
         if path == "/api/health":
@@ -240,6 +253,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._route_approval(method, path)
         if path.startswith("/api/scheduler/jobs/"):
             return self._route_sched_job(method, path)
+        if path.startswith("/api/providers/"):
+            return self._route_providers(method, path)
         self._error(404, "not found")
 
     # -- static dashboard -----------------------------------------------------
@@ -262,17 +277,25 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- API: status ------------------------------------------------------------
     def _api_status(self, qs) -> None:
+        from . import providers as providers_mod
+        from .browsertools import check_chromium
         cfg = self.ctx.cfg
-        gemini_key = bool(os.environ.get("NEXTCLAW_GEMINI_API_KEY"))
+        store = self.ctx.provider_store
+        providers_mod.seed_from_legacy_config(store, cfg)
+        default_id = store.get_setting("default_id")
+        default = store.get(default_id) if default_id else None
         self._send_json({
             "version": VERSION,
             "workspace_root": cfg.workspace_root,
             "data_dir": cfg.data_dir,
             "providers": {
-                "gemini": {"configured": gemini_key, "model": cfg.llm_model},
-                "ollama": {"configured": bool(cfg.ollama_model), "model": cfg.ollama_model,
-                           "url": cfg.ollama_url},
+                "default_id": default_id,
+                "default_name": (default or {}).get("name", ""),
+                "default_model": (default or {}).get("model", ""),
+                "count": len(store.list()),
+                "fallback_ids": store.get_fallbacks(),
             },
+            "browser": check_chromium(),
             "offline": os.environ.get("NEXTCLAW_OFFLINE") == "1",
         })
 
@@ -438,32 +461,214 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- API: providers ---------------------------------------------------------------
     def _api_providers(self, qs) -> None:
-        cfg = self.ctx.cfg
-        self._send_json({
-            "providers": {
-                "gemini": {
-                    "configured": bool(os.environ.get("NEXTCLAW_GEMINI_API_KEY")),
-                    "model": cfg.llm_model,
-                    "note": "key comes from NEXTCLAW_GEMINI_API_KEY; never exposed here",
-                },
-                "ollama": {
-                    "configured": bool(cfg.ollama_model),
-                    "model": cfg.ollama_model,
-                    "url": cfg.ollama_url,
-                },
-            },
-            "active": cfg.llm_provider,
-        })
+        """Legacy summary endpoint; now backed by the provider store."""
+        from . import providers as providers_mod
+        store = self.ctx.provider_store
+        providers_mod.seed_from_legacy_config(store, self.ctx.cfg)
+        configs = store.list()
+        default_id = store.get_setting("default_id")
+        out = {}
+        for c in configs:
+            out[c["id"]] = {
+                "name": c["name"], "adapter": c["adapter"],
+                "display_name": c["display_name"], "model": c["model"],
+                "base_url": c["base_url"], "enabled": c["enabled"],
+                "is_default": c["id"] == default_id,
+                "api_key_masked": c["api_key_masked"],
+                "last_test_ok": c.get("last_test_ok"),
+                "last_test_error": c.get("last_test_error", ""),
+            }
+        # Backwards-compatible gemini/ollama keys for old dashboard code.
+        legacy = {}
+        for c in configs:
+            if c["adapter"] in ("gemini", "ollama") and c["adapter"] not in legacy:
+                legacy[c["adapter"]] = {
+                    "configured": c["enabled"] and bool(c["api_key_masked"] or c["adapter"] == "ollama"),
+                    "model": c["model"], "url": c.get("base_url", ""),
+                }
+        out.update(legacy)
+        self._send_json({"providers": out, "active": default_id,
+                         "default_id": default_id,
+                         "fallback_ids": store.get_fallbacks()})
 
     def _api_test_provider(self, qs) -> None:
+        """Legacy: {"provider": "<config id or adapter name>"}."""
+        from . import providers as providers_mod
         self.ctx.rate.check(self.client_address[0], "provider_test")
         body = _json_body(self)
-        provider = body.get("provider") or self.ctx.cfg.llm_provider
-        if provider == "gemini":
-            return self._send_json(_test_gemini())
-        if provider == "ollama":
-            return self._send_json(_test_ollama(self.ctx.cfg))
-        self._error(400, "unknown provider")
+        want = (body.get("provider") or "").strip()
+        store = self.ctx.provider_store
+        target = None
+        for c in store.list():
+            if c["id"] == want or c["adapter"] == want or c["name"] == want:
+                target = c
+                break
+        if target is None:
+            # Fall back to the old env-based checks for unmigrated setups.
+            if want in ("gemini", ""):
+                return self._send_json(_test_gemini())
+            if want == "ollama":
+                return self._send_json(_test_ollama(self.ctx.cfg))
+            self._error(400, "unknown provider")
+            return
+        result = self._test_config(target["id"])
+        self._send_json(result)
+
+    def _test_config(self, pid: str) -> Dict[str, Any]:
+        from . import providers as providers_mod
+        store = self.ctx.provider_store
+        row = store.get(pid, include_secret=True)
+        if not row:
+            return {"ok": False, "error": "unknown provider"}
+        try:
+            provider = providers_mod.build_provider(row)
+        except providers_mod.ProviderError as exc:
+            store.record_test(pid, False, str(exc))
+            return {"ok": False, "error": str(exc)}
+        try:
+            result = provider.test_connection(timeout_s=15)
+        except providers_mod.ProviderError as exc:
+            result = {"ok": False, "error": str(exc)}
+        except Exception as exc:  # never leak a traceback to the dashboard
+            result = {"ok": False, "error": f"test failed: {exc}"}
+        # Redact any secret that slipped into the message.
+        secrets = [v for v in (row.get("api_key"), row.get("aws_secret_key")) if v]
+        if not result.get("ok"):
+            result["error"] = providers_mod.redact_secrets(result.get("error", ""), secrets)
+        store.record_test(pid, bool(result.get("ok")), result.get("error", ""))
+        return result
+
+    # -- API: provider configs (CRUD) -------------------------------------------------
+    def _route_providers(self, method: str, path: str) -> None:
+        from . import providers as providers_mod
+        rest = path[len("/api/providers/"):]
+        parts = [p for p in rest.split("/") if p]
+        store = self.ctx.provider_store
+
+        if parts == ["presets"] and method == "GET":
+            presets = []
+            for p in providers_mod.PRESETS:
+                presets.append({k: v for k, v in p.items()})
+            return self._send_json({"presets": presets})
+
+        if parts == ["routing"] and method == "GET":
+            return self._send_json({
+                "default_id": store.get_setting("default_id"),
+                "fallback_ids": store.get_fallbacks()})
+
+        if parts == ["routing"] and method == "POST":
+            body = _json_body(self)
+            try:
+                if "default_id" in body and body["default_id"]:
+                    store.set_default(body["default_id"])
+                if "fallback_ids" in body:
+                    ids = body["fallback_ids"]
+                    if not isinstance(ids, list):
+                        raise providers_mod.ProviderError("fallback_ids must be a list")
+                    store.set_fallbacks([str(i) for i in ids])
+            except providers_mod.ProviderError as exc:
+                raise ApiError(400, str(exc))
+            self.ctx.approvals.audit("user", "providers.routing", "",
+                                     {"default": store.get_setting("default_id"),
+                                      "fallbacks": store.get_fallbacks()})
+            return self._send_json({"default_id": store.get_setting("default_id"),
+                                    "fallback_ids": store.get_fallbacks()})
+
+        if parts == ["configs"] and method == "GET":
+            configs = store.list()
+            for c in configs:
+                c["capabilities"] = providers_mod.adapter_capabilities(
+                    c["adapter"], c.get("capabilities_override"))
+            return self._send_json({"configs": configs,
+                                    "default_id": store.get_setting("default_id"),
+                                    "fallback_ids": store.get_fallbacks()})
+
+        if parts == ["configs"] and method == "POST":
+            body = _json_body(self)
+            try:
+                cfg_row = store.create(body)
+            except providers_mod.ProviderError as exc:
+                raise ApiError(400, str(exc))
+            cfg_row["capabilities"] = providers_mod.adapter_capabilities(
+                cfg_row["adapter"], cfg_row.get("capabilities_override"))
+            self.ctx.approvals.audit("user", "providers.created", cfg_row["id"],
+                                     {"name": cfg_row["name"], "adapter": cfg_row["adapter"]})
+            return self._send_json(cfg_row, status=201)
+
+        if len(parts) >= 2 and parts[0] == "configs":
+            pid = parts[1]
+            if len(parts) == 2 and method == "GET":
+                row = store.get(pid)
+                if not row:
+                    return self._error(404, "unknown provider")
+                row["capabilities"] = providers_mod.adapter_capabilities(
+                    row["adapter"], row.get("capabilities_override"))
+                return self._send_json(row)
+            if len(parts) == 2 and method == "PUT":
+                body = _json_body(self)
+                try:
+                    row = store.update(pid, body)
+                except providers_mod.ProviderError as exc:
+                    raise ApiError(400, str(exc))
+                row["capabilities"] = providers_mod.adapter_capabilities(
+                    row["adapter"], row.get("capabilities_override"))
+                self.ctx.approvals.audit("user", "providers.updated", pid, {})
+                return self._send_json(row)
+            if len(parts) == 2 and method == "DELETE":
+                try:
+                    store.delete(pid)
+                except providers_mod.ProviderError as exc:
+                    raise ApiError(400, str(exc))
+                self.ctx.approvals.audit("user", "providers.deleted", pid, {})
+                return self._send_json({"deleted": pid})
+            if len(parts) == 3 and parts[2] == "test" and method == "POST":
+                self.ctx.rate.check(self.client_address[0], "provider_test")
+                return self._send_json(self._test_config(pid))
+            if len(parts) == 3 and parts[2] == "models" and method == "GET":
+                row = store.get(pid, include_secret=True)
+                if not row:
+                    return self._error(404, "unknown provider")
+                try:
+                    provider = providers_mod.build_provider(row)
+                    models = provider.list_models(timeout_s=15)
+                except providers_mod.ProviderError as exc:
+                    return self._send_json({"models": [], "error": str(exc)})
+                except Exception as exc:
+                    return self._send_json({"models": [], "error": f"discovery failed: {exc}"})
+                return self._send_json({"models": models})
+            if len(parts) == 3 and parts[2] == "chat" and method == "POST":
+                return self._provider_chat(pid)
+        self._error(404, "not found")
+
+    def _provider_chat(self, pid: str) -> None:
+        """Send a user test prompt to one provider; return text + usage."""
+        from . import providers as providers_mod
+        self.ctx.rate.check(self.client_address[0], "provider_chat")
+        body = _json_body(self)
+        prompt = (body.get("prompt") or "").strip()
+        if not prompt or len(prompt) > 4000:
+            raise ApiError(400, "prompt must be 1..4000 chars")
+        store = self.ctx.provider_store
+        row = store.get(pid, include_secret=True)
+        if not row:
+            return self._error(404, "unknown provider")
+        try:
+            provider = providers_mod.build_provider(row)
+        except providers_mod.ProviderError as exc:
+            raise ApiError(400, str(exc))
+        timeout_s = min(int(body.get("timeout_s", row.get("timeout_s", 60))), 120)
+        try:
+            resp = provider.chat("You are a helpful assistant. Answer briefly.",
+                                 [{"role": "user", "text": prompt}], [],
+                                 timeout_s=timeout_s)
+        except providers_mod.ProviderError as exc:
+            secrets = [v for v in (row.get("api_key"), row.get("aws_secret_key")) if v]
+            raise ApiError(502, providers_mod.redact_secrets(str(exc), secrets))
+        self._send_json({
+            "text": resp.text[:4000], "finish_reason": resp.finish_reason,
+            "latency_ms": resp.latency_ms, "adapter": row["adapter"],
+            "model": row["model"],
+        })
 
     def _api_config_provider(self, qs) -> None:
         body = _json_body(self)

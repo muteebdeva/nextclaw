@@ -2,6 +2,7 @@
 import os
 import threading
 import unittest
+import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from nextclaw.browsertools import BrowserError, fetch_url
@@ -95,6 +96,40 @@ class VerifyFileWriteTest(unittest.TestCase):
         self.assertTrue(v.output["ok"])
         v2 = tools.execute("verify.file_write", {"path": "a.txt", "sha256": "0" * 64}, cfg)
         self.assertFalse(v2.output["ok"])
+
+
+class ChromiumProbeTest(unittest.TestCase):
+    def test_probe_result_cached(self):
+        from nextclaw import browsertools
+        calls = []
+        fake = {"available": True, "binary": "/x/chrome", "version": "v",
+                "reason": "probe ok"}
+
+        def _fake_probe():
+            calls.append(1)
+            return dict(fake)
+
+        with unittest.mock.patch.object(browsertools, "_probe_chromium_cdp",
+                                        _fake_probe):
+            browsertools._CHROMIUM_PROBE_CACHE.clear()
+            r1 = browsertools.check_chromium()
+            r2 = browsertools.check_chromium()
+        self.assertEqual(r1, fake)
+        self.assertEqual(r2, fake)
+        self.assertEqual(len(calls), 1)  # second call served from cache
+        browsertools._CHROMIUM_PROBE_CACHE.clear()
+
+    def test_probe_shape(self):
+        from nextclaw import browsertools
+        with unittest.mock.patch.object(
+                browsertools, "_probe_chromium_cdp",
+                return_value={"available": False, "binary": None,
+                              "version": None, "reason": "no binary"}):
+            browsertools._CHROMIUM_PROBE_CACHE.clear()
+            r = browsertools.check_chromium()
+            browsertools._CHROMIUM_PROBE_CACHE.clear()
+        self.assertFalse(r["available"])
+        self.assertIn("reason", r)
 
 
 if __name__ == "__main__":

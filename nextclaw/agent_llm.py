@@ -13,10 +13,14 @@ Safety invariants (unchanged from the MVP core):
 """
 from __future__ import annotations
 
+import json
+import os
+import re
 import time
 from typing import Any, Dict, List, Tuple
 
 from . import llm as llm_mod
+from . import providers as providers_mod
 from . import tools
 from .config import Config, ensure_data_dir
 from .memory import MemoryStore
@@ -75,8 +79,125 @@ def _history_for_provider(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 }
             )
         elif role == "tool":
-            out.append({"role": "tool", "name": t.get("name", ""), "output": t.get("output")})
+            out.append({"role": "tool", "name": t.get("name", ""),
+                        "output": t.get("output"),
+                        "tool_call_id": t.get("tool_call_id", "")})
     return out
+
+
+def _capabilities(provider) -> providers_mod.Capabilities:
+    caps_fn = getattr(provider, "capabilities", None)
+    if callable(caps_fn):
+        try:
+            return caps_fn()
+        except Exception:
+            pass
+    return providers_mod.Capabilities()
+
+
+# Explicitly labeled compatibility mode for models without native tool
+# calling. Opt-in per provider config; never silent.
+_COMPAT_INSTRUCTION = """
+
+[TOOL COMPATIBILITY MODE — experimental, explicitly enabled for this model]
+You do not have native tool calling. To use a tool, end your message with a
+JSON array inside <tool_calls> tags, for example:
+<tool_calls>[{"name": "fs.list", "args": {"path": "src", "pattern": "**/*.py"}}]</tool_calls>
+Use only the documented tool names and arguments. Emit at most one array per
+message."""
+
+_TOOL_CALLS_RE = re.compile(r"<tool_calls>(.*?)</tool_calls>", re.S)
+
+
+def _parse_compat_calls(text: str) -> List[llm_mod.ToolCall]:
+    m = _TOOL_CALLS_RE.search(text or "")
+    if not m:
+        return []
+    try:
+        items = json.loads(m.group(1))
+    except (json.JSONDecodeError, ValueError):
+        return []
+    out = []
+    for i, it in enumerate(items if isinstance(items, list) else []):
+        if isinstance(it, dict) and it.get("name"):
+            args = it.get("args", {})
+            out.append(llm_mod.ToolCall(
+                id=f"compat_{i}", name=str(it["name"]),
+                args=dict(args) if isinstance(args, dict) else {"_raw": str(args)[:2000]}))
+    return out
+
+
+def _resolve_chain(cfg: Config, provider=None) -> List[Tuple[str, Any]]:
+    """[(config_id, provider)] — explicit provider, or default + fallbacks."""
+    if provider is not None:
+        return [("explicit", provider)]
+    if os.environ.get("NEXTCLAW_OFFLINE", "") == "1":
+        raise providers_mod.NotConfigured(
+            "offline mode (NEXTCLAW_OFFLINE=1): no model calls allowed")
+    store = providers_mod.ProviderStore(cfg.data_dir)
+    providers_mod.seed_from_legacy_config(store, cfg)
+    chain = providers_mod.resolve_chain(store)
+    if not chain:
+        raise providers_mod.NotConfigured(
+            "no usable AI provider configured — add one in the dashboard"
+            " under Providers, or set NEXTCLAW_GEMINI_API_KEY")
+    return chain
+
+
+def _chat_with_fallbacks(chain, system, history, declarations, cfg, budget):
+    """Try each provider in order; retry transient failures with backoff.
+
+    - RateLimited/TransientError: retry same provider (bounded), then next.
+    - QuotaExhausted: next fallback immediately; global cooldown recorded only
+      when every provider is exhausted.
+    - AuthError/InvalidModelError/NotConfigured: next fallback, never retried.
+    """
+    attempts: List[str] = []
+    for index, (pid, provider) in enumerate(chain):
+        last = index == len(chain) - 1
+        max_retries = int(getattr(provider, "max_retries", 2) or 0)
+        compat = bool(getattr(provider, "compat_json_tools", False)) \
+            and not _capabilities(provider).tools
+        sys_prompt = system + (_COMPAT_INSTRUCTION if compat else "")
+        delay = 5
+        for attempt in range(max_retries + 1):
+            try:
+                resp = provider.chat(sys_prompt, history, declarations,
+                                     timeout_s=cfg.llm_timeout_s)
+                budget.record()
+                if compat and not resp.tool_calls:
+                    parsed = _parse_compat_calls(resp.text)
+                    if parsed:
+                        resp.tool_calls = parsed
+                return resp, pid
+            except providers_mod.QuotaExhausted as exc:
+                # Never hammer an exhausted quota; fall through to the next
+                # provider. The shared cooldown is recorded only when the
+                # whole chain is exhausted.
+                attempts.append(f"{pid}: quota exhausted")
+                if last:
+                    budget.record(quota_exhausted=True)
+                    raise
+                break
+            except providers_mod.RateLimited as exc:
+                if attempt >= max_retries:
+                    attempts.append(f"{pid}: rate limited")
+                    break
+                time.sleep(exc.retry_after_s if exc.retry_after_s > 0 else delay)
+                delay = min(delay * 2, 60)
+            except providers_mod.TransientError as exc:
+                if attempt >= max_retries:
+                    attempts.append(f"{pid}: {exc}")
+                    break
+                time.sleep(delay)
+                delay = min(delay * 2, 60)
+            except (providers_mod.AuthError, providers_mod.InvalidModelError,
+                    providers_mod.NotConfigured, providers_mod.ProviderError) as exc:
+                # Permanent for this config (or unknown): move on, don't retry.
+                attempts.append(f"{pid}: {exc}")
+                break
+    raise providers_mod.ProviderError(
+        "all configured providers failed — " + "; ".join(attempts))
 
 
 def run_llm_task(
@@ -105,14 +226,17 @@ def run_llm_task(
 
     if provider is None:
         try:
-            provider = llm_mod.llm_provider(cfg)
-        except llm_mod.ProviderError as exc:
+            chain = _resolve_chain(cfg)
+        except providers_mod.ProviderError as exc:
             # Fail the task with a clear message instead of a traceback;
-            # e.g. missing NEXTCLAW_GEMINI_API_KEY or offline mode.
+            # e.g. no provider configured or offline mode.
             store.set_task_status(task_id, "failed", error=str(exc))
             return store.get_task(task_id)
+    else:
+        chain = [("explicit", provider)]
     budget = llm_mod.RequestBudget(cfg.data_dir)
     declarations = llm_mod.build_declarations(cfg.allowed_tools)
+    allowed_names = {d["name"] for d in declarations}
     deadline = time.time() + cfg.task_timeout_s
     turn_index = store.count_turns(task_id)
     max_task_requests = int(getattr(cfg, "llm_max_requests_per_task", 40))
@@ -130,10 +254,9 @@ def run_llm_task(
         history = _history_for_provider(turns)
         try:
             budget.check(cfg)  # fail fast: cooldown / daily cap, no wasted call
-            resp = _chat_with_retry(provider, SYSTEM_PROMPT, history, declarations, cfg)
-            budget.record()
+            resp, used_provider = _chat_with_fallbacks(
+                chain, SYSTEM_PROMPT, history, declarations, cfg, budget)
         except llm_mod.QuotaExhausted as exc:
-            budget.record(quota_exhausted=True)
             return _finish(task_id, store, cfg, "failed", error=f"model error: {exc}")
         except llm_mod.ProviderError as exc:
             return _finish(task_id, store, cfg, "failed", error=f"model error: {exc}")
@@ -157,7 +280,9 @@ def run_llm_task(
             return _verify_and_finish(task_id, store, cfg, params, resp.text)
 
         for tc in resp.tool_calls:
-            outcome, output = _execute_tool_call(task_id, store, cfg, tc, approvals, turn_index, approver)
+            outcome, output = _execute_tool_call(
+                task_id, store, cfg, tc, approvals, turn_index, approver,
+                allowed_names)
             if outcome == "awaiting_approval":
                 return store.get_task(task_id)
             if outcome == "denied":
@@ -199,29 +324,43 @@ def _chat_with_retry(provider, system, history, declarations, cfg, retries: int 
     raise llm_mod.ProviderError("unreachable")
 
 
-def _execute_tool_call(task_id, store, cfg, tc: llm_mod.ToolCall, approvals, turn_index, approver=None):
+def _execute_tool_call(task_id, store, cfg, tc: llm_mod.ToolCall, approvals,
+                       turn_index, approver=None, allowed_names=None):
     """Permission-check, execute, checkpoint.
 
     Returns (status, output): 'ok', 'awaiting_approval' (no approver wired),
     or 'denied' (approver refused).
     """
     step_name = f"turn{turn_index}:{tc.name}"
+    # Guard 1: the model must only call tools we actually declared. Anything
+    # else is recorded as a model error — never executed, never retried blindly.
+    if allowed_names is not None and tc.name not in allowed_names:
+        err = {"error": f"unknown tool '{tc.name}'; available: {sorted(allowed_names)}"}
+        store.add_turn(task_id, "tool", {"name": tc.name, "output": err,
+                                         "tool_call_id": tc.id})
+        return "ok", err
+    # Guard 2: arguments must be a JSON object.
+    if not isinstance(tc.args, dict):
+        err = {"error": f"tool '{tc.name}' needs an argument object, got: {str(tc.args)[:200]}"}
+        store.add_turn(task_id, "tool", {"name": tc.name, "output": err,
+                                         "tool_call_id": tc.id})
+        return "ok", err
     try:
         tools.check_permission(tc.name, tc.args, cfg, approvals)
     except tools.ApprovalRequired as exc:
         if approver is not None and approver(task_id, tc.name, tc.args, str(exc)):
             approvals = approvals + (tc.name,)
         elif approver is not None:
-            store.add_turn(task_id, "tool", {"name": tc.name, "output": {"error": "approval denied by user"}})
+            store.add_turn(task_id, "tool", {"name": tc.name, "output": {"error": "approval denied by user"}, "tool_call_id": tc.id})
             return "denied", {"error": "approval denied by user"}
         else:
-            store.add_turn(task_id, "tool", {"name": tc.name, "output": {"error": str(exc)}})
+            store.add_turn(task_id, "tool", {"name": tc.name, "output": {"error": str(exc)}, "tool_call_id": tc.id})
             store.set_task_status(task_id, "awaiting_approval", error=str(exc))
             return "awaiting_approval", {"error": str(exc)}
     except tools.ToolError as exc:
         # Denied by policy: tell the model so it can adjust, don't crash.
         denied = {"error": f"denied: {exc}"}
-        store.add_turn(task_id, "tool", {"name": tc.name, "output": denied})
+        store.add_turn(task_id, "tool", {"name": tc.name, "output": denied, "tool_call_id": tc.id})
         return "ok", denied
 
     res = tools.execute(tc.name, tc.args, cfg, approvals)
@@ -240,7 +379,7 @@ def _execute_tool_call(task_id, store, cfg, tc: llm_mod.ToolCall, approvals, tur
         result={"ok": res.ok, "output": output, "error": res.error, "duration_ms": res.duration_ms},
         error="" if res.ok else res.error,
     )
-    store.add_turn(task_id, "tool", {"name": tc.name, "output": output})
+    store.add_turn(task_id, "tool", {"name": tc.name, "output": output, "tool_call_id": tc.id})
     return "ok", output
 
 

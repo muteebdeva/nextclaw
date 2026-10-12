@@ -41,9 +41,17 @@
   words, calls tools, inspects real outputs. Turns + tool calls checkpointed
   to the `turns` table; resume continues the persisted conversation.
   Stops on the task's explicit verifier (`ok:true`) to prevent second-guessing.
-- `llm.py` - real provider abstraction (`GeminiProvider` with function
-  calling incl. thoughtSignature round-trip, `OllamaProvider` for local
-  models). Keys only from environment; unconfigured providers fail closed.
+  Resolves a default + fallback provider chain per task; unknown tool names
+  are never executed; experimental JSON tool-compat mode is opt-in only.
+- `providers.py` - universal provider system: five stdlib adapters
+  (`openai_compat`, `anthropic`, `gemini`, `ollama`, `bedrock` w/ SigV4)
+  behind one normalized `ChatProvider` interface; `ProviderStore` (SQLite)
+  for user configs with masked secrets, env-var key references, SSRF-guard
+  URL validation, and default/fallback routing. Legacy `llm_*` settings
+  auto-migrate on first run.
+- `llm.py` - shared error taxonomy (`AuthError`, `TransientError`,
+  `QuotaExhausted`, …), native Gemini/Ollama implementations (wrapped as
+  adapters), and `RequestBudget` (daily cap + quota cooldown).
   429-with-quota raises `QuotaExhausted` (never retried); transient 429/503
   retried with backoff honoring `Retry-After`. `RequestBudget` enforces a
   daily cap and a post-exhaustion cooldown that fails fast without HTTP.

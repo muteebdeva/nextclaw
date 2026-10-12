@@ -165,6 +165,84 @@ def cmd_cycle(args, cfg: Config) -> int:
     return 0
 
 
+def cmd_providers(args, cfg: Config) -> int:
+    from .providers import ProviderStore, build_provider, seed_from_legacy_config
+    from .config import ensure_data_dir
+    ensure_data_dir(cfg)
+    store = ProviderStore(cfg.data_dir)
+    seed_from_legacy_config(store, cfg)
+    action = args.provider_action
+
+    def _find():
+        want = args.id or args.name or ""
+        for c in store.list():
+            if c["id"] == want or c["name"] == want:
+                return c
+        return None
+
+    if action == "presets":
+        from .providers import PRESETS
+        for p in PRESETS:
+            print(f"{p['id']:15} {p['display']:28} {p['adapter']:14} {p.get('default_model', '')}")
+        return 0
+    if action == "list":
+        default_id = store.get_setting("default_id")
+        fallbacks = store.get_fallbacks()
+        for c in store.list():
+            flags = []
+            if c["id"] == default_id:
+                flags.append("default")
+            if c["id"] in fallbacks:
+                flags.append(f"fallback#{fallbacks.index(c['id']) + 1}")
+            if not c["enabled"]:
+                flags.append("disabled")
+            print(f"{c['id']}  {c['name']:20} {c['adapter']:14} "
+                  f"{c['model'] or '-':30} {c['api_key_masked'] or '-':16} "
+                  f"{' '.join(flags)}")
+        return 0
+    if action == "set-default":
+        row = _find()
+        if not row:
+            print("error: provide --id or --name of an existing provider")
+            return 1
+        try:
+            store.set_default(row["id"])
+        except Exception as exc:
+            print(f"error: {exc}")
+            return 1
+        print(f"default -> {row['name']}")
+        return 0
+    if action == "test":
+        row = _find()
+        if not row:
+            print("error: provide --id or --name of an existing provider")
+            return 1
+        full = store.get(row["id"], include_secret=True)
+        try:
+            provider = build_provider(full)
+        except Exception as exc:
+            print(f"NOT CONFIGURED: {exc}")
+            return 1
+        result = provider.test_connection(timeout_s=15)
+        store.record_test(row["id"], bool(result.get("ok")), result.get("error", ""))
+        if result.get("ok"):
+            print(f"OK: {row['name']}")
+            models = result.get("models") or result.get("models_sample") or []
+            if models:
+                print("models: " + ", ".join(models[:10]))
+            if result.get("note"):
+                print(result["note"])
+            return 0
+        print(f"FAILED: {result.get('error')}")
+        return 1
+    raise SystemExit(f"unknown provider action '{action}'")
+
+
+def cmd_serve(args, cfg: Config) -> int:
+    from .server import serve
+    return serve(cfg, host=args.host, port=args.port)
+
+
 def cmd_scheduler(args, cfg: Config) -> int:
     from .scheduler import Scheduler, DEV_CYCLE_JOB
 
@@ -264,11 +342,6 @@ def cmd_cancel(args, cfg: Config) -> int:
     return 0
 
 
-def cmd_serve(args, cfg: Config) -> int:
-    from .server import serve
-    return serve(cfg, host=args.host, port=args.port)
-
-
 def cmd_channels(args, cfg: Config) -> int:
     if args.channel_action == "telegram":
         from .channels import run_telegram
@@ -333,6 +406,12 @@ def main(argv=None) -> int:
                    choices=["ensure", "start", "stop", "status", "run-now", "recover", "daemon"])
     p.add_argument("--job", default=None)
 
+    p = sub.add_parser("providers", help="Manage AI provider configurations")
+    p.add_argument("provider_action",
+                   choices=["list", "test", "set-default", "presets"])
+    p.add_argument("--id", default=None, help="Provider config id")
+    p.add_argument("--name", default=None, help="Provider config name")
+
     args = parser.parse_args(argv)
     overrides = {}
     if args.data_dir:
@@ -358,6 +437,7 @@ def main(argv=None) -> int:
         "bench": lambda: cmd_bench(args, cfg),
         "cycle": lambda: cmd_cycle(args, cfg),
         "scheduler": lambda: cmd_scheduler(args, cfg),
+        "providers": lambda: cmd_providers(args, cfg),
     }
     return handlers[args.cmd]()
 
